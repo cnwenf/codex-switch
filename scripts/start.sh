@@ -29,4 +29,13 @@ if [ -d /System/Library/Keychains ] && command -v security >/dev/null 2>&1; then
   fi
 fi
 
+# 本地环境变量(如各 provider 的 API key)。文件由用户自行创建(chmod 600),
+# 例如含一行 DASHSCOPE_API_KEY=sk-...;不存在则跳过。
+ENV_FILE="$DIR/env"
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  echo "[codex-switch] loaded local env: $ENV_FILE"
+fi
+
 exec node src/server.js "$@"

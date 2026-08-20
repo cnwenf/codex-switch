@@ -189,12 +189,20 @@ export function buildCatalogEntry(modelId, caps, provider) {
     visibility: 'list',
     supported_in_api: true,
     priority: 1,
+    // 0.144.x 必填字段(无 serde default),已对照 codex-rs rust-v0.144.1
+    // codex-rs/protocol/src/openai_models.rs 逐一核对:
+    //   base_instructions: String / supports_reasoning_summaries: bool /
+    //   supports_parallel_tool_calls: bool / experimental_supported_tools: Vec<String>。
+    // 新版本没有的字段被 serde 忽略(ModelInfo 无 deny_unknown_fields),多给无害。
+    base_instructions: '',
+    supports_reasoning_summaries: true,
     support_verbosity: false,
     truncation_policy: { mode: 'bytes', limit: 10000 },
+    supports_parallel_tool_calls: true,
     input_modalities: caps.vision ? ['text', 'image'] : ['text'],
     experimental_supported_tools: [],
     effective_context_window_percent: 95,
-    supports_reasoning_summary_parameter: true,
+    supports_reasoning_summary_parameter: true, // 0.145+ 的字段名;0.144 忽略
     default_reasoning_summary: 'auto',
   };
   if (caps.contextWindow != null) entry.context_window = caps.contextWindow;
