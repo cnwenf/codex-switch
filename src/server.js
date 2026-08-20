@@ -122,6 +122,9 @@ const CODEX_CFG = path.join(CODEX_DIR, 'config.toml');
 const CODEX_CATALOG = path.join(CODEX_DIR, 'catalog.json');
 const BACKUP_DIR = path.join(os.homedir(), '.codex-switch', 'backups');
 const CATALOG_LINE = 'model_catalog_json = "~/.codex/catalog.json"   # replaces the bundled model catalog';
+// 不切换 provider,Codex 仍会把所有请求发给官方 openai;必须整体指向本地代理,
+// 由代理按 body.model 路由(官方模型 → chatgpt 后端,其余 → 各自上游)。
+const MODEL_PROVIDER_LINE = 'model_provider = "codexswitch"   # codex-switch: route ALL models via the local proxy';
 
 // 官方订阅检测:只做存在性判断,绝不读取/打印任何 token 值。
 // 返回登录状态、脱敏账号、官方模型列表(不在本代理路由表中的 catalog 条目)与
@@ -182,11 +185,15 @@ requires_openai_auth = true   # Codex manages OAuth refresh + carries subscripti
 }
 
 // 手术式合并 ~/.codex/config.toml:
+//  - model_provider 行:已有则替换该行,没有则插到文件头部
 //  - model_catalog_json 行:已有则替换该行,没有则插到文件头部
 //  - [model_providers.codexswitch] 段:已有旧段则整段替换,没有则追加到文件末尾
 //  其余所有字节原样保留(官方配置绝对不覆盖)。
 function mergeCodexConfigToml(existing) {
   const lines = existing.split('\n');
+  const mpIdx = lines.findIndex((l) => /^\s*model_provider\s*=/.test(l));
+  if (mpIdx >= 0) lines[mpIdx] = MODEL_PROVIDER_LINE;
+  else lines.unshift(MODEL_PROVIDER_LINE);
   const cfgIdx = lines.findIndex((l) => /^\s*model_catalog_json\s*=/.test(l));
   if (cfgIdx >= 0) lines[cfgIdx] = CATALOG_LINE;
   else lines.unshift(CATALOG_LINE);
