@@ -67,10 +67,6 @@ echo
 echo "  安全说明:本地极薄代理。只读 body.model 做路由,请求/响应字节级原样"
 echo "  转发不改写;仅按 provider 配置注入/剥离认证头;只监听 127.0.0.1。"
 echo
-if [ ! -f "$HOME/.codex-switch/env" ]; then
-  echo "  API key 走环境变量(如 DASHSCOPE_API_KEY),创建后重启一次即可:"
-  echo "    printf 'DASHSCOPE_API_KEY=sk-xxx\\\\n' > $HOME/.codex-switch/env"
-  echo "    chmod 600 $HOME/.codex-switch/env && ./install.sh"
-  echo "  (key 只在这一个文件里,不进仓库、不进命令行历史)"
-fi
+echo "  API Key:打开管理页 → 供应商页「API 凭证」栏,直接粘贴 Key 保存即可"
+echo "  (服务端自动写入 $HOME/.codex-switch/env,chmod 600,保存后立即生效,无需手工建文件)"
 echo

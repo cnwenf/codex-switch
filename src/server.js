@@ -144,6 +144,96 @@ function authPlan(provider) {
   throw new Error(`provider '${provider.id}': unknown auth type '${type}'`);
 }
 
+// ---------- API 凭证:管理页直接填写 → 写入 ~/.codex-switch/env ----------
+// scripts/start.sh 启动时 source 该文件;server.js 启动时再装载一遍(直接 node 启动也生效);
+// 页面保存后同时 set process.env,当前进程立即生效(authPlan 每请求读 process.env)。
+// 安全约束:只接受供应商 token_env 引用过的变量名(白名单);值绝不写日志、绝不回传前端,
+// GET 只返回 {name, configured};文件 chmod 600,原子写入(tmp+rename)。
+const ENV_FILE = path.join(os.homedir(), '.codex-switch', 'env');
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function allowedEnvNames() {
+  const names = new Set();
+  for (const p of getConfig().providers || []) {
+    if (p.token_env) names.add(String(p.token_env));
+  }
+  return names;
+}
+
+function shellQuote(v) {
+  // 被 POSIX sh source 时单引号最稳;内嵌单引号写成 '\''
+  return "'" + String(v).replace(/'/g, "'\\''") + "'";
+}
+
+function parseEnvFile(text) {
+  const out = new Map();
+  for (const line of String(text).split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const eq = t.indexOf('=');
+    if (eq <= 0) continue;
+    const k = t.slice(0, eq).trim();
+    let v = t.slice(eq + 1).trim();
+    if (v.length >= 2 && ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"')))) {
+      v = v.slice(1, -1);
+    }
+    if (ENV_NAME_RE.test(k)) out.set(k, v);
+  }
+  return out;
+}
+
+function readEnvFileEntries() {
+  return fs.existsSync(ENV_FILE) ? parseEnvFile(fs.readFileSync(ENV_FILE, 'utf8')) : new Map();
+}
+
+function writeEnvFile(entries) {
+  fs.mkdirSync(path.dirname(ENV_FILE), { recursive: true });
+  const lines = ['# codex-switch API 凭证(管理页生成;scripts/start.sh 启动时 source;chmod 600)'];
+  for (const [k, v] of entries) lines.push(`${k}=${shellQuote(v)}`);
+  const tmp = `${ENV_FILE}.tmp`;
+  fs.writeFileSync(tmp, lines.join('\n') + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, ENV_FILE);
+  try { fs.chmodSync(ENV_FILE, 0o600); } catch { /* 个别文件系统不支持 chmod,忽略 */ }
+}
+
+// 启动时装载:文件值优先(与 start.sh 里 source 覆盖 shell 环境的语义一致)。只报数量,不报值。
+function loadEnvFileIntoProcess() {
+  const entries = readEnvFileEntries();
+  for (const [k, v] of entries) process.env[k] = v;
+  return entries.size;
+}
+
+function envKeyStatus() {
+  const fileKeys = readEnvFileEntries();
+  return [...allowedEnvNames()].sort().map((name) => ({
+    name,
+    configured: Boolean(process.env[name]) || Boolean(fileKeys.get(name)),
+  }));
+}
+
+function saveEnvKey(name, value) {
+  if (!ENV_NAME_RE.test(name)) throw new Error('非法的环境变量名');
+  if (!allowedEnvNames().has(name)) throw new Error(`环境变量 '${name}' 未被任何供应商的 token_env 引用,拒绝写入`);
+  if (typeof value !== 'string' || !value.trim()) throw new Error('Key 值不能为空(要移除请用「清除」)');
+  if (value.length > 4096) throw new Error('Key 值过长');
+  const entries = readEnvFileEntries();
+  entries.set(name, value);
+  writeEnvFile(entries);
+  process.env[name] = value; // 当前进程立即生效
+  console.log(`[codex-switch] env key saved: ${name} (value never logged)`);
+  return { ok: true, name };
+}
+
+function deleteEnvKey(name) {
+  if (!ENV_NAME_RE.test(name)) throw new Error('非法的环境变量名');
+  const entries = readEnvFileEntries();
+  const removed = entries.delete(name);
+  writeEnvFile(entries);
+  delete process.env[name];
+  console.log(`[codex-switch] env key removed: ${name}`);
+  return { ok: true, name, removed };
+}
+
 // ---------- codex 侧配置:官方订阅检测 + 一键应用/备份/还原 ----------
 // 只做管理页展示 + ~/.codex 文件的手术式合并。官方自有配置与模型条目绝对不覆盖:
 // 合并时只增删 codex-switch 自己的两段内容,其余字节原样保留。
@@ -267,9 +357,34 @@ function mirrorOfficialEntry(entry, provider) {
   return e;
 }
 
+// 展示排序:官方订阅模型在前,其他供应商在后;组内按名称倒排(qwen3.8 在 qwen3.7 前)。
+// 非路由保留条目(纯官方内容)视同官方订阅组。
+function modelDisplayGroup(slug) {
+  const p = getRouteTable().get(slug);
+  return (!p || p.auth === 'chatgpt_subscription') ? 0 : 1;
+}
+function sortModelsForDisplay(entries) {
+  return entries.sort((a, b) => {
+    const g = modelDisplayGroup(a.slug) - modelDisplayGroup(b.slug);
+    if (g !== 0) return g;
+    return b.slug.localeCompare(a.slug); // 名称倒排
+  });
+}
+// slug 列表版同一规则(管理页并集模型展示用;路由 id 本身不受影响)。
+function sortSlugsForDisplay(slugs) {
+  return slugs.slice().sort((a, b) => {
+    const g = modelDisplayGroup(a) - modelDisplayGroup(b);
+    if (g !== 0) return g;
+    return b.localeCompare(a); // 名称倒排
+  });
+}
+
 // 合并 ~/.codex/catalog.json:保留所有官方条目(其 slug 不在本代理路由表内的
 // 全部原样保留),追加 codex-switch 代理的模型条目。官方 slug 用镜像条目
 // (百分百精确),非官方模型(qwen 等)用合成条目。
+// 顺序与 priority:官方订阅在前、其他供应商在后、组内名称倒排;
+// Codex 选择器按 priority 升序展示,这里按最终顺序重写 priority=1..N
+// (镜像条目的官方 priority 是排序元数据,能力字段仍逐字节保留)。
 function mergeCatalog(existingText) {
   const mine = new Set(getRouteTable().keys());
   const oc = officialCatalog();
@@ -289,6 +404,8 @@ function mergeCatalog(existingText) {
     if (off) kept.push(mirrorOfficialEntry(off, prov));
     else kept.push(buildCatalogEntry(id, resolveCaps(c, prov, id), prov));
   }
+  sortModelsForDisplay(kept);
+  kept.forEach((m, i) => { m.priority = i + 1; });
   return JSON.stringify({ ...cat, models: kept }, null, 2) + '\n';
 }
 
@@ -763,7 +880,7 @@ function deleteProvider(id) {
 function enabledUnion() {
   const c = getConfig();
   const enabled = (c.providers || []).filter((p) => p.enabled !== false);
-  return { providers: enabled.length, total: (c.providers || []).length, models: [...getRouteTable().keys()] };
+  return { providers: enabled.length, total: (c.providers || []).length, models: sortSlugsForDisplay([...getRouteTable().keys()]) };
 }
 
 // ---------- admin ----------
@@ -781,6 +898,9 @@ ${codexProviderBlock().trimEnd()}
     if (off) catalog.models.push(mirrorOfficialEntry(off, prov));
     else catalog.models.push(buildCatalogEntry(id, resolveCaps(c, prov, id), prov));
   }
+  // 与 mergeCatalog 落盘结果保持一致:官方订阅在前、其余按名称倒排,priority 重排 1..N
+  sortModelsForDisplay(catalog.models);
+  catalog.models.forEach((m, i) => { m.priority = i + 1; });
   return { config_toml: configToml, catalog_json: JSON.stringify(catalog, null, 2) };
 }
 
@@ -857,6 +977,14 @@ main{max-width:1080px;margin:1.5rem auto 2.5rem;padding:0 1.25rem}
   border:1px solid var(--border);border-radius:12px}
 .mtag{display:inline-block;font:11.5px/1.6 var(--mono);padding:.08rem .5rem;border-radius:6px;
   background:rgba(109,141,255,.1);border:1px solid rgba(109,141,255,.28);color:var(--accent2);white-space:nowrap}
+
+.envkeys{display:flex;flex-direction:column;gap:.5rem}
+.envrow{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;padding:.55rem .75rem;
+  border:1px solid var(--border);border-radius:10px;background:var(--bg2)}
+.envname{font-size:.8rem;color:var(--accent2);min-width:13em}
+.envin{flex:1;min-width:220px;background:#0b0e14;color:var(--text);border:1px solid var(--border);
+  border-radius:8px;padding:.4rem .65rem;font:12px/1.6 var(--mono)}
+.envin:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(109,141,255,.14)}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:.9rem}
 .pcard{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--border);border-radius:14px;
@@ -984,8 +1112,13 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
       </div>
     </div>
     <div id="unionChips" class="union-chips"><span class="hint">加载中…</span></div>
+    <section class="card" id="envKeysCard" style="margin-bottom:.9rem;display:none">
+      <div class="card-head"><h2><span class="bar"></span>API 凭证</h2><span class="badge">保存到 ~/.codex-switch/env · chmod 600 · 保存后立即生效</span></div>
+      <div id="envKeysList" class="envkeys"><span class="hint">加载中…</span></div>
+      <p class="note" style="margin-top:.6rem">在下方直接粘贴 Key 并保存即可,无需手工创建环境变量文件。Key 只写入本机 <span class="mono">~/.codex-switch/env</span>(启动时自动装载),保存后立即生效、无需重启;值不会回传页面、不写日志、不进仓库。</p>
+    </section>
     <div id="providerGrid" class="grid"></div>
-    <p class="note">Codex 看到的模型 = 所有「启用」供应商的模型并集。停用供应商不会删除它,只是从路由表和并集中移除。密钥只存环境变量名,页面与配置文件里永远不出现明文。</p>
+    <p class="note">Codex 看到的模型 = 所有「启用」供应商的模型并集。停用供应商不会删除它,只是从路由表和并集中移除。API Key 在上方「API 凭证」栏直接填写;供应商配置里只存环境变量名。</p>
   </section>
 
   <section id="tab-codex" class="pane" style="display:none">
@@ -1066,7 +1199,7 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
 <div id="toast"></div>
 
 <script>
-var CURRENT={providers:[],union:{providers:0,total:0,models:[]}};
+var CURRENT={providers:[],union:{providers:0,total:0,models:[]},envKeys:[],officialSync:{modelCount:0,sources:[]}};
 var EDITING=null;
 function $(id){return document.getElementById(id);}
 function escH(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
@@ -1100,7 +1233,8 @@ function loadProviders(){
     CURRENT.providers=j.providers||[];
     CURRENT.union=j.union||{providers:0,total:0,models:[]};
     CURRENT.officialSync=j.officialSync||{modelCount:0,sources:[]};
-    renderUnion();renderCards();
+    CURRENT.envKeys=j.envKeys||[];
+    renderUnion();renderEnvKeys();renderCards();
   }).catch(function(e){toast('加载供应商失败: '+e.message,false);});
 }
 function renderUnion(){
@@ -1110,6 +1244,35 @@ function renderUnion(){
   if(!u.models.length){chips.innerHTML='<span class="hint">没有启用的供应商或模型为空,Codex 将看不到任何模型。</span>';return;}
   chips.innerHTML=u.models.map(function(m){return '<span class="mtag" title="'+escH(m)+'">'+escH(prettyName(m))+'</span>';}).join('');
 }
+function renderEnvKeys(){
+  var card=$('envKeysCard');var box=$('envKeysList');
+  var ks=CURRENT.envKeys||[];
+  if(!ks.length){card.style.display='none';return;}
+  card.style.display='';
+  box.innerHTML=ks.map(function(k){
+    var badge=k.configured?'<span class="badge ok">已配置</span>':'<span class="badge warn">未配置</span>';
+    return '<div class="envrow">'
+      +'<span class="envname mono">'+escH(k.name)+'</span>'
+      +badge
+      +'<input type="password" class="envin" id="envin-'+escH(k.name)+'" placeholder="在此粘贴 '+escH(k.name)+' 的值并保存" autocomplete="off" spellcheck="false">'
+      +'<button class="btn small primary" data-envsave="'+escH(k.name)+'">保存</button>'
+      +(k.configured?'<button class="btn small danger" data-envdel="'+escH(k.name)+'">清除</button>':'')
+    +'</div>';
+  }).join('');
+}
+function saveEnvKeyUI(name){
+  var inp=$('envin-'+name);var v=inp?inp.value.trim():'';
+  if(!v){toast('请先粘贴 Key 的值;要移除请点「清除」',false);return;}
+  api('/__admin/env-keys/save',{name:name,value:v}).then(function(){
+    toast('已保存: '+name+',立即生效(无需重启)');loadProviders();
+  }).catch(function(e){toast('保存失败: '+e.message,false);});
+}
+function delEnvKeyUI(name){
+  if(!confirm('确认清除凭证 '+name+'?清除后对应供应商将不可用。'))return;
+  api('/__admin/env-keys/delete',{name:name}).then(function(){
+    toast('已清除: '+name);loadProviders();
+  }).catch(function(e){toast('清除失败: '+e.message,false);});
+}
 function renderCards(){
   var g=$('providerGrid');var ps=CURRENT.providers;
   if(!ps.length){g.innerHTML='<div class="empty">还没有供应商。点右上角「＋ 添加供应商」创建第一个。</div>';return;}
@@ -1117,12 +1280,18 @@ function renderCards(){
 }
 function cardHtml(p){
   var on=p.enabled!==false;
-  var models=(p.models||[]).map(function(m){return '<span class="mtag" title="'+escH(m)+'">'+escH(prettyName(m))+'</span>';}).join('')||'<span class="hint">未配置模型</span>';
+  var models=(p.models||[]).slice().sort(function(a,b){return b.localeCompare(a);}).map(function(m){return '<span class="mtag" title="'+escH(m)+'">'+escH(prettyName(m))+'</span>';}).join('')||'<span class="hint">未配置模型</span>';
   if(p.auth==='chatgpt_subscription'&&CURRENT.officialSync&&CURRENT.officialSync.modelCount){
     models+='<span class="hint"> … 另有官方内嵌目录 '+CURRENT.officialSync.modelCount+' 个模型自动同步(快速模式/官方提示词逐字节保留,升级 codex 自动更新)</span>';
   }
   var cred='';
-  if(p.token_env)cred='<span class="cred">env: '+escH(p.token_env)+'</span>';
+  if(p.token_env){
+    var st=null;var eks=CURRENT.envKeys||[];
+    for(var i=0;i<eks.length;i++){if(eks[i].name===p.token_env){st=eks[i];break;}}
+    cred=(st&&st.configured)
+      ?'<span class="cred">env: '+escH(p.token_env)+' · 已配置 ✓</span>'
+      :'<span class="warn-text">env: '+escH(p.token_env)+' · 未配置(在上方「API 凭证」栏填写)</span>';
+  }
   else if(p.auth==='bearer')cred='<span class="warn-text">缺少凭证</span>';
   return '<div class="pcard'+(on?'':' off')+'">'
     +'<div class="pcard-top">'
@@ -1221,6 +1390,13 @@ $('providerGrid').addEventListener('click',function(e){
 $('providerGrid').addEventListener('change',function(e){
   var t=e.target;
   if(t&&t.matches&&t.matches('[data-toggle]'))toggleP(t.getAttribute('data-id'),t.checked);
+});
+$('envKeysList').addEventListener('click',function(e){
+  var t=e.target;
+  if(!t||!t.getAttribute)return;
+  var s=t.getAttribute('data-envsave');var d=t.getAttribute('data-envdel');
+  if(s)saveEnvKeyUI(s);
+  if(d)delEnvKeyUI(d);
 });
 function refreshCaps(){
   toast('正在联网获取模型能力…');
@@ -1356,7 +1532,7 @@ async function handleAdmin(req, bodyBuf, res) {
           const oc = officialCatalog();
           officialSync = { modelCount: oc.models.size, sources: oc.sources.map((s) => ({ bin: s.bin, models: s.modelCount })) };
         } catch { /* 提取失败不影响供应商列表 */ }
-        return sendJson(res, 200, { ok: true, providers, union: enabledUnion(), officialSync });
+        return sendJson(res, 200, { ok: true, providers, union: enabledUnion(), officialSync, envKeys: envKeyStatus() });
       }
       if (req.method === 'POST' && p === '/__admin/providers') {
         return sendJson(res, 200, addProvider(body));
@@ -1369,6 +1545,24 @@ async function handleAdmin(req, bodyBuf, res) {
       }
       if (req.method === 'POST' && p === '/__admin/providers/delete') {
         return sendJson(res, 200, deleteProvider(String(body.id || '')));
+      }
+    } catch (e) {
+      return sendJson(res, 400, { error: String(e.message) });
+    }
+    return sendJson(res, 404, { error: 'not found', path: p });
+  }
+
+  // ---------- API 凭证(页面填写 → ~/.codex-switch/env,值只进文件与 process.env) ----------
+  if (p.startsWith('/__admin/env-keys')) {
+    try {
+      if (req.method === 'GET' && p === '/__admin/env-keys') {
+        return sendJson(res, 200, { ok: true, keys: envKeyStatus() }); // 只有 name+configured,绝不回传值
+      }
+      if (req.method === 'POST' && p === '/__admin/env-keys/save') {
+        return sendJson(res, 200, saveEnvKey(String(body.name || ''), body.value));
+      }
+      if (req.method === 'POST' && p === '/__admin/env-keys/delete') {
+        return sendJson(res, 200, deleteEnvKey(String(body.name || '')));
       }
     } catch (e) {
       return sendJson(res, 400, { error: String(e.message) });
@@ -1457,6 +1651,8 @@ function ensureDir(p) { fs.mkdirSync(path.dirname(p), { recursive: true }); }
 function start() {
   console.log(`[codex-switch] config file: ${CONFIG_PATH}`);
   loadConfig();
+  const envLoaded = loadEnvFileIntoProcess();
+  if (envLoaded) console.log(`[codex-switch] env file loaded: ${envLoaded} key(s) from ${ENV_FILE}`);
   const off = detectOfficial();
   console.log(off.loggedIn
     ? `[codex-switch] official subscription: logged in (${off.identity || 'account'}), preserving ${off.configSections.length} config sections + ${off.officialModels.length} official models`
