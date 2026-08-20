@@ -3,21 +3,19 @@
 //             > [built-in static table below] > [conservative default].
 // Capabilities feed the generated catalog.json consumed by Codex
 // (codex-rs ModelInfo schema, codex-rs/protocol/src/openai_models.rs).
+// 官方模型不走本模块:server.js mergeCatalog 用 official.js 的二进制镜像条目。
 //
 // 对 codex 请求体零改写:本模块只影响 catalog 生成,不影响转发路径上的任何字节。
 
-// ---------- built-in static table (web-researched 2026-08-20) ----------
-// gpt-5.6 / gpt-5.6-sol:
-//   developers.openai.com/api/docs/models/gpt-5.6-sol — context 1,050,000;
-//   Reasoning.effort: none, low, medium (default), high, xhigh, max;
-//   openai.com/index/gpt-5-6 — ultra available in the Codex product (Plus+, chatgpt backend).
-// gpt-5.5:
-//   openai.com/index/introducing-gpt-5-5 — in Codex: 400K context,
-//   five levels: non-reasoning(none)/low/medium(default)/high/xhigh; vision multimodal.
-// codex-1:
-//   openai.com/index/introducing-codex — tested at 192K max context at launch (2025-05);
-//   2026 product supports image input. Context set to a safe low-biased 256K
-//   (Codex compacts earlier rather than overflowing upstream). 用户可用 override 覆盖。
+// ---------- built-in static table ----------
+// 官方模型(gpt-5.6-*/gpt-5.5/gpt-5.4*/gpt-5.2/codex-auto-review):
+//   正常路径由 official.js 从 codex 二进制内嵌 catalog 逐字节镜像,这里的静态值
+//   仅是找不到二进制时的回退,数值取自官方内嵌 catalog(codex-cli 0.144.1 提取):
+//   gpt-5.6-sol/terra/luna: ctx 372000,levels low/medium/high/xhigh/max
+//     (ultra 仅 sol/terra),default sol=low、其余 medium;
+//   gpt-5.5/gpt-5.4/gpt-5.4-mini/gpt-5.2/codex-auto-review:
+//     ctx 272000,levels low/medium/high/xhigh,default medium;全部支持图片输入。
+//   注意:gpt-5.6(裸 slug)与 codex-1 不存在,官方后端会拒绝,切勿加回。
 // qwen3.8-max / qwen3.7-plus / qwen3.7-flash:
 //   help.aliyun.com/zh/model-studio/qwen3-8-max — context 1,000,000, 输入模态 Image+Text+Video;
 //   help.aliyun.com/zh/model-studio/qwen3-7-plus, qwen3-7-flash — same;
@@ -25,26 +23,50 @@
 //   reasoning.effort 支持 none/minimal/low/medium/high/xhigh/max 共 7 档(默认 xhigh);
 //   xhigh/max 仅华北2(北京)与新加坡可用,故 default 取 medium(全地域安全)。
 const STATIC_CAPS = {
-  'gpt-5.6': {
-    contextWindow: 1000000,
+  'gpt-5.6-sol': {
+    contextWindow: 372000,
     vision: true,
-    levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    defaultLevel: 'low',
+  },
+  'gpt-5.6-terra': {
+    contextWindow: 372000,
+    vision: true,
+    levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     defaultLevel: 'medium',
   },
-  'gpt-5.6-sol': {
-    contextWindow: 1000000,
+  'gpt-5.6-luna': {
+    contextWindow: 372000,
     vision: true,
-    levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    levels: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultLevel: 'medium',
   },
   'gpt-5.5': {
-    contextWindow: 400000,
+    contextWindow: 272000,
     vision: true,
-    levels: ['none', 'low', 'medium', 'high', 'xhigh'],
+    levels: ['low', 'medium', 'high', 'xhigh'],
     defaultLevel: 'medium',
   },
-  'codex-1': {
-    contextWindow: 256000, // estimate: low-biased (launch doc 192K; product reports higher)
+  'gpt-5.4': {
+    contextWindow: 272000,
+    vision: true,
+    levels: ['low', 'medium', 'high', 'xhigh'],
+    defaultLevel: 'medium',
+  },
+  'gpt-5.4-mini': {
+    contextWindow: 272000,
+    vision: true,
+    levels: ['low', 'medium', 'high', 'xhigh'],
+    defaultLevel: 'medium',
+  },
+  'gpt-5.2': {
+    contextWindow: 272000,
+    vision: true,
+    levels: ['low', 'medium', 'high', 'xhigh'],
+    defaultLevel: 'medium',
+  },
+  'codex-auto-review': {
+    contextWindow: 272000,
     vision: true,
     levels: ['low', 'medium', 'high', 'xhigh'],
     defaultLevel: 'medium',
@@ -176,10 +198,26 @@ export function resolveCaps(config, provider, modelId) {
 // ---------- catalog.json entry (codex-rs ModelInfo wire schema) ----------
 // Required keys per codex-rs/protocol/src/openai_models.rs + its deserialization tests.
 // input_modalities must be explicit: omitted defaults to [text, image] in core.
+
+// 美化模型展示名:qwen3.8-max → "Qwen3.8 Max"(连字符→空格,每词首字母大写)。
+// 常见缩写整体大写(gpt → GPT),避免出现 "Gpt" 这种丑写法。
+// 只影响展示(display_name);路由用的模型 id(slug)一个字节都不变。
+const NAME_ACRONYMS = new Set(['gpt', 'api', 'llm', 'url', 'ws']);
+export function prettifyModelName(id) {
+  return String(id)
+    .split('-')
+    .map((w) => {
+      if (!w) return w;
+      if (NAME_ACRONYMS.has(w.toLowerCase())) return w.toUpperCase();
+      return w.charAt(0).toUpperCase() + w.slice(1);
+    })
+    .join(' ');
+}
+
 export function buildCatalogEntry(modelId, caps, provider) {
   const entry = {
     slug: modelId,
-    display_name: `${modelId} (${provider.name || provider.id})`,
+    display_name: `${prettifyModelName(modelId)} (${provider.name || provider.id})`,
     description: `${provider.name || provider.id} via codex-switch`,
     supported_reasoning_levels: (caps.levels || []).map((effort) => ({
       effort,

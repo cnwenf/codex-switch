@@ -8,12 +8,15 @@ auth_json_path = "~/.codex/auth.json"
 
 # 订阅路由:Codex 用 requires_openai_auth=true 自带 OAuth token(新鲜),proxy 原样转发,
 # 仅在缺失时补 ChatGPT-Account-ID。
+# models 只是回退清单:auth=chatgpt_subscription 的供应商会自动同步 codex 二进制
+# 内嵌官方 catalog 的全部模型(官方新增模型 → 升级 codex 即自动出现)。
+# 注意:gpt-5.6(裸 slug)与 codex-1 不存在,官方后端会拒绝。
 [[providers]]
 id = "chatgpt-sub"
 name = "ChatGPT 订阅"
 base_url = "https://chatgpt.com/backend-api/codex"
 auth = "chatgpt_subscription"
-models = ["gpt-5.6", "gpt-5.5", "gpt-5.6-sol", "codex-1"]
+models = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "codex-auto-review", "gpt-5.3-codex-spark"]
 
 # 百炼路由:剥离 Codex 的 OAuth,注入 DASHSCOPE_API_KEY。
 [[providers]]

@@ -12,6 +12,7 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import TOML from '@iarna/toml';
 import { buildCatalogEntry, capsCache, CAPS_TTL_MS, fetchProviderCaps, resolveCaps } from './caps.js';
+import { officialCatalog } from './official.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 function resolveConfigPath() {
@@ -46,6 +47,22 @@ function buildRouteTable(c) {
       m.set(model, p);
     }
   }
+  // 官方目录自动同步:chatgpt_subscription 供应商自动承接 codex 二进制内嵌官方
+  // catalog 里的全部模型(OpenAI 新增模型随 codex 升级自动发现,无需手工维护)。
+  // 提取失败时静默跳过,配置里手写的 models 列表仍然生效(回退)。
+  const sub = (c.providers || []).find((p) => p.enabled !== false && p.auth === 'chatgpt_subscription');
+  if (sub) {
+    try {
+      const oc = officialCatalog();
+      let added = 0;
+      for (const slug of oc.models.keys()) {
+        if (!m.has(slug)) { m.set(slug, sub); added++; }
+      }
+      if (oc.models.size) console.log(`[codex-switch] official sync: ${oc.models.size} embedded models (${added} new) via '${sub.id}'`);
+    } catch (e) {
+      console.warn(`[codex-switch] official catalog sync skipped: ${e.message}`);
+    }
+  }
   return m;
 }
 
@@ -64,8 +81,21 @@ function getConfig() {
   loadConfig();
   return cfg;
 }
+// 二进制指纹:codex 升级(官方新增模型)后无需改配置/重启,路由表自动重建。
+// officialCatalog() 内部按 (mtime,size) 缓存,这里只做廉价 stat。
+let binFingerprint = '';
+function officialFingerprint() {
+  try {
+    return officialCatalog().sources.map((s) => `${s.bin}:${s.mtimeMs}:${s.modelCount}`).join('|');
+  } catch { return ''; }
+}
 function getRouteTable() {
   loadConfig();
+  const fp = officialFingerprint();
+  if (fp !== binFingerprint) {
+    routeTable = buildRouteTable(cfg);
+    binFingerprint = fp;
+  }
   return routeTable;
 }
 function getListenParts() {
@@ -160,6 +190,18 @@ function detectOfficial() {
       officialModels = (cat.models || []).map((x) => x.slug).filter((s) => s && !mine.has(s));
     } catch { officialModels = []; }
   }
+  // 官方内嵌目录自动同步状态(来源二进制 + 模型清单),供管理页展示
+  let embeddedCatalog = null;
+  try {
+    const oc = officialCatalog();
+    if (oc.models.size) {
+      embeddedCatalog = {
+        modelCount: oc.models.size,
+        slugs: [...oc.models.keys()],
+        sources: oc.sources.map((s) => ({ bin: s.bin, models: s.modelCount, mtimeMs: s.mtimeMs })),
+      };
+    }
+  } catch { embeddedCatalog = null; }
   return {
     loggedIn,
     identity,
@@ -167,6 +209,7 @@ function detectOfficial() {
     catalogExists: fs.existsSync(CODEX_CATALOG),
     configSections: sections,
     officialModels,
+    embeddedCatalog,
   };
 }
 
@@ -210,19 +253,41 @@ function mergeCodexConfigToml(existing) {
   return lines.join('\n');
 }
 
+// 官方模型条目镜像:以 codex 二进制内嵌条目为底,逐字段保留官方原值
+// (additional_speed_tiers/service_tiers=快速模式,model_messages=官方系统提示,
+//  context_window/truncation/verbosity/... 全部 1:1),只改三处:
+//  1) display_name 追加供应商名(页面可辨认走的是哪个供应商);
+//  2) description 追加 via codex-switch 标记;
+//  3) prefer_websockets 强制关:官方 wss 传输指向 chatgpt.com,本地代理是纯 HTTP。
+function mirrorOfficialEntry(entry, provider) {
+  const e = JSON.parse(JSON.stringify(entry));
+  e.display_name = `${entry.display_name || entry.slug} (${provider.name || provider.id})`;
+  e.description = entry.description ? `${entry.description} · via codex-switch` : `via codex-switch (${provider.name || provider.id})`;
+  e.prefer_websockets = false;
+  return e;
+}
+
 // 合并 ~/.codex/catalog.json:保留所有官方条目(其 slug 不在本代理路由表内的
-// 全部原样保留),追加 codex-switch 代理的模型条目。
+// 全部原样保留),追加 codex-switch 代理的模型条目。官方 slug 用镜像条目
+// (百分百精确),非官方模型(qwen 等)用合成条目。
 function mergeCatalog(existingText) {
   const mine = new Set(getRouteTable().keys());
+  const oc = officialCatalog();
   let cat = { models: [] };
   if (existingText) {
     try { cat = JSON.parse(existingText); } catch { cat = { models: [] }; }
   }
-  const kept = (Array.isArray(cat.models) ? cat.models : []).filter((x) => x?.slug && !mine.has(x.slug));
+  // 保留非本代理路由的条目(真正的官方内容绝不覆盖);但清掉我们自己的过期条目
+  // (description 含 via codex-switch 标记且已不在路由表中,例如失效的旧模型 id),
+  // 否则它们会残留在选择器里继续被官方后端拒绝。
+  const kept = (Array.isArray(cat.models) ? cat.models : [])
+    .filter((x) => x?.slug && !mine.has(x.slug))
+    .filter((x) => !String(x.description || '').includes('via codex-switch'));
   const c = getConfig();
   for (const [id, prov] of getRouteTable().entries()) {
-    const caps = resolveCaps(c, prov, id);
-    kept.push(buildCatalogEntry(id, caps, prov));
+    const off = oc.models.get(id);
+    if (off) kept.push(mirrorOfficialEntry(off, prov));
+    else kept.push(buildCatalogEntry(id, resolveCaps(c, prov, id), prov));
   }
   return JSON.stringify({ ...cat, models: kept }, null, 2) + '\n';
 }
@@ -336,7 +401,12 @@ function applyToCodex() {
   }
   const existingCat = fs.existsSync(CODEX_CATALOG) ? fs.readFileSync(CODEX_CATALOG, 'utf8') : '';
   const mergedCat = mergeCatalog(existingCat);
-  const v = validateCatalogJson(mergedCat, new Set(getRouteTable().keys()));
+  // 严格校验只针对我们合成的条目(qwen 等);官方镜像条目逐字节来自官方二进制,
+  // 结构天然合法,绝不因我们的校验规则拒绝官方内容。
+  const oc = officialCatalog();
+  const officialSynced = [...getRouteTable().keys()].filter((s) => oc.models.has(s));
+  const strictMine = new Set([...getRouteTable().keys()].filter((s) => !oc.models.has(s)));
+  const v = validateCatalogJson(mergedCat, strictMine);
   if (!v.ok) return { ok: false, error: '合并后的 catalog.json 校验失败,未写入任何文件', detail: v.error };
 
   const backups = [];
@@ -356,7 +426,8 @@ function applyToCodex() {
     officialModelsAfter: after.officialModels.length,
     officialModels: after.officialModels,
   };
-  console.log(`[codex-switch] codex-apply: backups=${backups.length}, sections ${preserved.configSectionsBefore}→${preserved.configSectionsAfter}, official models ${preserved.officialModelsBefore}→${preserved.officialModelsAfter}`);
+  preserved.officialSyncedModels = officialSynced;
+  console.log(`[codex-switch] codex-apply: backups=${backups.length}, sections ${preserved.configSectionsBefore}→${preserved.configSectionsAfter}, official models ${preserved.officialModelsBefore}→${preserved.officialModelsAfter}, mirrored from binaries: ${officialSynced.length}`);
   return { ok: true, backups, preserved };
 }
 
@@ -687,13 +758,12 @@ function deleteProvider(id) {
   });
 }
 
-// 已启用供应商模型的并集(Codex 实际可见的模型集合)
+// 已启用供应商模型的并集(Codex 实际可见的模型集合)。
+// 直接取路由表:含官方内嵌目录自动同步进来的模型。
 function enabledUnion() {
   const c = getConfig();
   const enabled = (c.providers || []).filter((p) => p.enabled !== false);
-  const models = new Set();
-  for (const p of enabled) for (const m of p.models || []) models.add(m);
-  return { providers: enabled.length, total: (c.providers || []).length, models: [...models] };
+  return { providers: enabled.length, total: (c.providers || []).length, models: [...getRouteTable().keys()] };
 }
 
 // ---------- admin ----------
@@ -704,10 +774,12 @@ ${CATALOG_LINE}
 
 ${codexProviderBlock().trimEnd()}
 `;
+  const oc = officialCatalog();
   const catalog = { models: [] };
   for (const [id, prov] of getRouteTable().entries()) {
-    const caps = resolveCaps(c, prov, id);
-    catalog.models.push(buildCatalogEntry(id, caps, prov));
+    const off = oc.models.get(id);
+    if (off) catalog.models.push(mirrorOfficialEntry(off, prov));
+    else catalog.models.push(buildCatalogEntry(id, resolveCaps(c, prov, id), prov));
   }
   return { config_toml: configToml, catalog_json: JSON.stringify(catalog, null, 2) };
 }
@@ -934,6 +1006,7 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
         <tr><td>账号(脱敏)</td><td class="mono" id="subId"></td></tr>
         <tr><td>auth.json</td><td class="mono" id="subAuth"></td></tr>
         <tr><td>官方模型</td><td id="subModels"></td></tr>
+<tr><td>官方目录同步</td><td id="subEmbedded"></td></tr>
         <tr><td>配置段</td><td id="subSections"></td></tr>
       </tbody></table>
       <p class="note">官方订阅的模型列表与配置只读展示;应用 / 还原时绝对不覆盖、不删除。</p>
@@ -997,6 +1070,8 @@ var CURRENT={providers:[],union:{providers:0,total:0,models:[]}};
 var EDITING=null;
 function $(id){return document.getElementById(id);}
 function escH(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+var PRETTY_ACR={gpt:1,api:1,llm:1,url:1,ws:1};
+function prettyName(s){return String(s==null?'':s).split('-').map(function(w){if(!w)return w;if(PRETTY_ACR[w.toLowerCase()])return w.toUpperCase();return w.charAt(0).toUpperCase()+w.slice(1);}).join(' ');}
 function toast(msg,ok){var t=$('toast');t.textContent=msg;t.className='show '+(ok===false?'err':'ok');clearTimeout(t._h);t._h=setTimeout(function(){t.className='';},2800);}
 function api(url,body){
   var opts=body===undefined?{method:'GET'}:{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)};
@@ -1024,6 +1099,7 @@ function loadProviders(){
   api('/__admin/providers').then(function(j){
     CURRENT.providers=j.providers||[];
     CURRENT.union=j.union||{providers:0,total:0,models:[]};
+    CURRENT.officialSync=j.officialSync||{modelCount:0,sources:[]};
     renderUnion();renderCards();
   }).catch(function(e){toast('加载供应商失败: '+e.message,false);});
 }
@@ -1032,7 +1108,7 @@ function renderUnion(){
   $('unionBar').innerHTML='已启用 <b>'+u.providers+'</b> / '+u.total+' 个供应商 · Codex 当前可见模型 <b>'+u.models.length+'</b> 个(并集)';
   var chips=$('unionChips');
   if(!u.models.length){chips.innerHTML='<span class="hint">没有启用的供应商或模型为空,Codex 将看不到任何模型。</span>';return;}
-  chips.innerHTML=u.models.map(function(m){return '<span class="mtag">'+escH(m)+'</span>';}).join('');
+  chips.innerHTML=u.models.map(function(m){return '<span class="mtag" title="'+escH(m)+'">'+escH(prettyName(m))+'</span>';}).join('');
 }
 function renderCards(){
   var g=$('providerGrid');var ps=CURRENT.providers;
@@ -1041,7 +1117,10 @@ function renderCards(){
 }
 function cardHtml(p){
   var on=p.enabled!==false;
-  var models=(p.models||[]).map(function(m){return '<span class="mtag">'+escH(m)+'</span>';}).join('')||'<span class="hint">未配置模型</span>';
+  var models=(p.models||[]).map(function(m){return '<span class="mtag" title="'+escH(m)+'">'+escH(prettyName(m))+'</span>';}).join('')||'<span class="hint">未配置模型</span>';
+  if(p.auth==='chatgpt_subscription'&&CURRENT.officialSync&&CURRENT.officialSync.modelCount){
+    models+='<span class="hint"> … 另有官方内嵌目录 '+CURRENT.officialSync.modelCount+' 个模型自动同步(快速模式/官方提示词逐字节保留,升级 codex 自动更新)</span>';
+  }
   var cred='';
   if(p.token_env)cred='<span class="cred">env: '+escH(p.token_env)+'</span>';
   else if(p.auth==='bearer')cred='<span class="warn-text">缺少凭证</span>';
@@ -1211,6 +1290,10 @@ function loadCodexStatus(){
     $('subAuth').textContent=j.authPath||'—';
     var om=j.officialModels||[];
     $('subModels').textContent=om.length?(om.length+' 个: '+om.join(', ')):'0 个(应用后将显示被保留的官方 catalog 条目)';
+    var em=j.embeddedCatalog;
+    $('subEmbedded').textContent=em
+      ?('✓ '+em.modelCount+' 个模型自动同步自 codex 二进制 — '+em.sources.map(function(s){return s.bin+' ['+s.models+' 个]';}).join(' ; ')+'。官方新增模型:升级 codex 后点「应用并备份」即生效。')
+      :'✗ 未找到 codex 二进制内嵌目录(回退:仅用配置文件中的模型列表)';
     var secs=j.configSections||[];
     $('subSections').textContent=secs.length?(secs.length+' 段: '+secs.slice(0,15).join(', ')+(secs.length>15?' …':'')):'0 段';
     var bl=$('backupList');
@@ -1268,7 +1351,12 @@ async function handleAdmin(req, bodyBuf, res) {
           delete o.token; // 明文密钥绝不回传前端
           return o;
         });
-        return sendJson(res, 200, { ok: true, providers, union: enabledUnion() });
+        let officialSync = { modelCount: 0, sources: [] };
+        try {
+          const oc = officialCatalog();
+          officialSync = { modelCount: oc.models.size, sources: oc.sources.map((s) => ({ bin: s.bin, models: s.modelCount })) };
+        } catch { /* 提取失败不影响供应商列表 */ }
+        return sendJson(res, 200, { ok: true, providers, union: enabledUnion(), officialSync });
       }
       if (req.method === 'POST' && p === '/__admin/providers') {
         return sendJson(res, 200, addProvider(body));
