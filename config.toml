@@ -1,0 +1,40 @@
+# codex-switch 默认配置
+# 无明文 secret:DASHSCOPE 走环境变量(下方 token_env);订阅 token 走 ~/.codex/auth.json(只读)。
+
+[proxy]
+listen = "127.0.0.1:8787"
+mount_prefix = "/v1"
+auth_json_path = "~/.codex/auth.json"
+
+# 订阅路由:Codex 用 requires_openai_auth=true 自带 OAuth token(新鲜),proxy 原样转发,
+# 仅在缺失时补 ChatGPT-Account-ID。
+[[providers]]
+id = "chatgpt-sub"
+name = "ChatGPT 订阅"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth = "chatgpt_subscription"
+models = ["gpt-5.6", "gpt-5.5", "gpt-5.6-sol", "codex-1"]
+
+# 百炼路由:剥离 Codex 的 OAuth,注入 DASHSCOPE_API_KEY。
+[[providers]]
+id = "bailian"
+name = "阿里云百炼"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+auth = "bearer"
+token_env = "DASHSCOPE_API_KEY"
+models = ["qwen3.8-max", "qwen3.7-plus", "qwen3.7-flash"]
+
+# ---------- 模型能力覆盖(可选)----------
+# 能力解析优先级:[model_overrides] > 百炼联网获取(仅 Bailian 且配了 API key,缓存 30 分钟)
+#              > 内置静态表(见 src/caps.js) > 保守默认(128K / 无视觉 / 不声明推理档位)。
+# 配好 provider 的 API key 和 URL 后,proxy 在启动与保存配置时自动联网抓取上下文窗口与输入模态;
+# 也可手工覆盖(例如对齐企业限流或新模型):
+#
+# [model_overrides."qwen3.8-max"]
+# context_window = 1000000          # 上下文窗口(tokens)
+# vision = true                     # 是否支持图片输入
+# reasoning_efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+# default_reasoning_effort = "medium"
+#
+# 能力只影响生成的 catalog.json(见管理页 ~/.codex/catalog.json),不改变请求转发的任何字节。
+# 保存后热生效;重启 Codex 后新 catalog 生效。

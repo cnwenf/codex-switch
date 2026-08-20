@@ -6,5 +6,13 @@
   "engines": {
     "node": ">=20"
   },
+  "scripts": {
+    "start": "sh scripts/start.sh",
+    "stop": "node src/server.js stop",
+    "status": "node src/server.js status"
+  },
+  "dependencies": {
+    "@iarna/toml": "^2.2.5"
+  },
   "private": true
 }

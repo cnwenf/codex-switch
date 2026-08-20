@@ -22,11 +22,15 @@
 - Codex 一个 `model_provider` 只能携带**一份**凭证(`env_key` 或 `requires_openai_auth` 二选一,或都不带);
 - 但代理要路由到 N 个**凭证不同**的上游(订阅 OAuth token vs 百炼 API key)。
 
-所以代理对 `Authorization`(以及个别 provider 专有 header,如订阅的 `ChatGPT-Account-ID`)**按 provider 配置替换/注入**,其余 header 原样转发,body 原样转发。这不算"改写 Codex 的请求"——Codex 在这个 provider 下不带凭证,代理是**补上**缺失的 auth。
+设计上让 Codex 的 `codexswitch` provider 设 `requires_openai_auth = true`:Codex 自己管 OAuth token 刷新(避免代理和 Codex 抢 refresh-token)、并自带订阅所需 header,发请求时带新鲜 `Authorization: Bearer {access_token}`。
 
-设计上让 Codex 的 `codexswitch` provider **不带任何客户端凭证**(不设 `env_key`、不设 `requires_openai_auth`),Codex 发请求时不带 Authorization;代理按命中的 provider 注入正确凭证。
+代理按命中的 provider 处理 `Authorization`:
 
-> 实现时需验证:Codex 对一个既没 `env_key` 又没 `requires_openai_auth` 的自定义 provider 是否会拒绝发包。若拒绝,退化为设一个 `env_key = "CODEXSWITCH_DUMMY"` 占位值,代理忽略 Codex 的 Authorization 并替换为 provider 凭证。
+- `chatgpt_subscription`(订阅路由):**原样转发** Codex 的 OAuth bearer,仅在缺失时补 `ChatGPT-Account-ID`(从 `~/.codex/auth.json` 只读取 `tokens.account_id`)。token 过期 401 透传回 Codex,Codex 自刷后再发。
+- `bearer`(API key 路由,如百炼):**剥离** Codex 的 OAuth `Authorization` + `ChatGPT-Account-ID`,注入 `Authorization: Bearer {$token_env}`。
+- `passthrough`:原样转发(同源 provider)。
+
+这不算"改写 Codex 请求"——订阅路由零改动;API key 路由是 Codex 在聚合 provider 下本就不该带订阅 header,代理按上游正确性做最小替换。
 
 ## 4. 架构
 
@@ -61,13 +65,13 @@ codex-switch proxy  (127.0.0.1:8787)
 [proxy]
 listen = "127.0.0.1:8787"
 mount_prefix = "/v1"                      # Codex base_url 的 path 部分
-auth_json_path = "~/.codex/auth.json"     # 只给 chatgpt_oauth 用,只读
+auth_json_path = "~/.codex/auth.json"     # 只给 chatgpt_subscription 补 account_id 用,只读
 
 [[providers]]
 id = "chatgpt-sub"
 name = "ChatGPT 订阅"
 base_url = "https://chatgpt.com/backend-api/codex"
-auth = "chatgpt_oauth"
+auth = "chatgpt_subscription"
 models = ["gpt-5.6", "gpt-5.5", "gpt-5.6-sol", "codex-1"]
 
 [[providers]]
@@ -77,12 +81,20 @@ base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 auth = "bearer"
 token_env = "DASHSCOPE_API_KEY"
 models = ["qwen3.8-max", "qwen3.7-plus", "qwen3.7-flash"]
+
+# 可选:模型能力覆盖(优先于联网/静态数据;只影响 catalog.json,见 §9.3)
+# [model_overrides."qwen3.8-max"]
+# context_window = 1000000
+# vision = true
+# reasoning_efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+# default_reasoning_effort = "medium"
 ```
 
-认证类型:
+认证类型(详见 §3):
 
-- `chatgpt_oauth`:每次请求**重读** `auth_json_path` 的 `access_token` + `account_id`(**只读,绝不写、绝不自己 refresh**——让 Codex 官方客户端自己刷,避免 refresh-token 复用冲突)。注入 `Authorization: Bearer {access_token}` + `ChatGPT-Account-ID: {account_id}`。token 过期就让 401 透传回 Codex,Codex 自己处理。
-- `bearer`:`Authorization: Bearer {token}`,token 从 `token_env` 指定的环境变量读(或 `token` 明文,不推荐)。
+- `chatgpt_subscription`:订阅路由。原样转发 Codex 的 OAuth `Authorization`(Codex 用 `requires_openai_auth=true` 自带新鲜 token);仅在缺失时从 `~/.codex/auth.json`(只读)补 `ChatGPT-Account-ID`。token 过期 401 透传回 Codex 自刷。
+- `bearer`:API key 路由(如百炼)。剥离 Codex 的 OAuth `Authorization` + `ChatGPT-Account-ID`,注入 `Authorization: Bearer {$token_env}`。
+- `passthrough`:原样转发(同源 provider)。
 
 配置热加载:代理每次请求 re-read config(或 file watch)。**改 provider / model / 上游地址 / 凭证都不需要重启 proxy**。
 
@@ -99,7 +111,7 @@ HTML 页**只写代理自己的 `config.toml`**;对 `~/.codex/` 只读展示 + �
 
 ## 8. 启动 / 停止 / 状态
 
-- 启动:`node src/server.js` 或 `npm start`。读 config,listen,同时起 HTML 页。PID 写 `~/.codex-switch/run.pid`。
+- 启动:`node src/server.js` 或 `npm start`。读 config,listen,同时起 HTML 页。PID 写 `~/.codex-switch/run.pid`。`npm start` 经 `scripts/start.sh`:macOS 下把**已有 `NODE_EXTRA_CA_CERTS` 文件内容 + 系统/登录钥匙串 CA 合并**成一个 bundle 再导出(企业 MITM/自签 CA 网络下 Node fetch 才能验 TLS;已有证书全部保留)。
 - 停止:`npm run stop`(读 PID 发 SIGTERM)或 Ctrl-C。
 - 状态:`npm run status`(查 PID 是否存活 + listen 端口)。
 - 可选:macOS launchd plist 开机自启(标为可选)。
@@ -129,21 +141,59 @@ model_catalog_json = "~/.codex/catalog.json"   # 指向本地 catalog(字段名�
 name = "codex-switch 聚合"
 base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
-# 不设 env_key、不设 requires_openai_auth —— 凭证由代理注入
+requires_openai_auth = true   # Codex 管 token 刷新 + 带订阅 header;代理订阅路由原样转发
 ```
 
-### 9.2 `~/.codex/catalog.json` 示例(全量替换格式)
+### 9.2 `~/.codex/catalog.json` 示例
+
+管理页展示的完整 catalog(schema = codex-rs `ModelInfo`,逐条含能力元数据,见 §9.3)。一条完整示例:
 
 ```json
 {
   "models": [
-    { "slug": "gpt-5.6",     "display_name": "GPT-5.6 (订阅)",    "model": "gpt-5.6",     "provider": "codexswitch" },
-    { "slug": "codex-1",     "display_name": "Codex (订阅)",      "model": "codex-1",     "provider": "codexswitch" },
-    { "slug": "qwen3.8-max", "display_name": "Qwen3.8-Max (百炼)","model": "qwen3.8-max", "provider": "codexswitch" },
-    { "slug": "qwen3.7-plus","display_name": "Qwen3.7-Plus (百炼)","model": "qwen3.7-plus","provider": "codexswitch" }
+    {
+      "slug": "gpt-5.6",
+      "display_name": "GPT-5.6 (ChatGPT 订阅)",
+      "description": "chatgpt-sub via codex-switch",
+      "supported_reasoning_levels": [
+        { "effort": "none",  "description": "Non-reasoning" },
+        { "effort": "low",   "description": "Low reasoning" },
+        { "effort": "medium","description": "Medium reasoning (default)" },
+        { "effort": "high",  "description": "High reasoning" },
+        { "effort": "xhigh", "description": "Extra high reasoning" },
+        { "effort": "max",   "description": "Maximum reasoning" },
+        { "effort": "ultra", "description": "Ultra (multi-agent)" }
+      ],
+      "default_reasoning_level": "medium",
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 1,
+      "support_verbosity": false,
+      "truncation_policy": { "mode": "bytes", "limit": 10000 },
+      "context_window": 1000000,
+      "input_modalities": ["text", "image"],
+      "experimental_supported_tools": [],
+      "effective_context_window_percent": 95,
+      "supports_reasoning_summary_parameter": true,
+      "default_reasoning_summary": "auto"
+    }
   ]
 }
 ```
+
+### 9.3 模型能力:上下文窗口 / 视觉输入 / 推理强度
+
+Codex 的 catalog 条目需要能力元数据(`context_window`、`input_modalities`、`supported_reasoning_levels`、`default_reasoning_level`),schema 对齐 codex-rs `ModelInfo`(codex-rs/protocol/src/openai_models.rs)。
+
+解析优先级:**config 覆盖 > 百炼联网 > 内置静态表(src/caps.js)> 保守默认**
+
+1. **config 覆盖**(最高):`[model_overrides."<model>"]` 手工指定 `context_window` / `vision` / `reasoning_efforts` / `default_reasoning_effort`。
+2. **百炼联网**:base_url 命中 DashScope 域(`dashscope.aliyuncs.com` / `dashscope-intl.aliyuncs.com` / `*.maas.aliyuncs.com`)的 provider,proxy 在**启动时**与**保存配置后**自动调原生 `GET /api/v1/models`(带该 provider 的 API key,10s 超时,分页最多 5 页),取 `model_info.context_window` 与 `inference_metadata.request_modality`(含 `Image` 即有视觉),缓存 30 分钟(`capsCache`)。管理页「Model capabilities」区可点 `refresh (fetch live)` 强制刷新(POST `/__admin/fetch-capabilities`)。无 key、非百炼域名、或接口不可达 → 自动跳过/回退,绝不影响转发。
+3. **内置静态表**:默认 7 个模型的能力已硬编码在 `src/caps.js`(2026-08-20 联网核实:gpt-5.6/5.6-sol 1M、gpt-5.5 400K、codex-1 256K、qwen3.8-max/3.7-plus/3.7-flash 1M,推理档位与默认值逐条列出)。
+4. **保守默认**:128K、无视觉、不声明推理档位(Codex 不发 effort 参数,用上游默认)。
+
+能力数据**只影响生成的 `catalog.json`**,请求转发的字节路径零改动(纯转发原则不变)。catalog 变更需**重启 Codex** 生效(§9)。
 
 ## 10. Codex 侧配置变更清单(每次代理配置改动时)
 
@@ -169,10 +219,11 @@ wire_api = "responses"
 - 尽量零运行时依赖:内置 `http`/`https`/`fs`/`crypto`;上游转发用 Node 20 全局 `fetch`(支持流式 `ReadableStream` 透传)。
 - 唯一依赖:TOML 解析(`@iarna/toml`)。HTML 用字符串模板,不引框架。
 
-## 12. 待实现时验证的点
+## 12. 已验证的点
 
-- [ ] Codex 对无 `env_key` 且无 `requires_openai_auth` 的自定义 provider 是否会发包(决定 auth 注入策略)。
-- [ ] Codex 是否会查询自定义 provider 的 `/v1/models` 端点(若会,代理可动态返回 model 列表,省掉 catalog.json;若不会,走 catalog.json 静态文件)。
-- [ ] `model_catalog_json` 这个 config 字段名的确切拼写(实现时翻 config.rs 确认)。
-- [ ] `~/.codex/auth.json` 里 `account_id` 字段位置(已初查在 `.tokens.account_id`,实现时再 jq 确认)。
-- [ ] 百炼 Responses 端点 path:兼容模式 `/compatible-mode/v1/responses`(已确认)。
+- [x] Codex 凭证策略:requires_openai_auth = true;订阅路由原样转发、bearer 路由换 Authorization。
+- [x] `/v1/models`:代理已实现 `GET {mount}/models` 聚合返回路由表全部模型(Codex 查或不查都可用;catalog.json 仍是能力的完整载体)。
+- [x] `model_catalog_json` 字段名:与 codex-rs `config/mod.rs` 源码核对一致,`~/.codex/catalog.json` 全量替换内置 catalog。
+- [x] `~/.codex/auth.json` 里 `account_id`:实现为 `.tokens.account_id || .account_id` 双位置兜底(只读)。
+- [x] 百炼 Responses 端点 path:兼容模式 `/compatible-mode/v1/responses`(已确认)。
+- [x] catalog 能力 schema:与 codex-rs `openai_models.rs`(ModelInfo 必填键/枚举/默认值)逐一核对,含 `input_modalities` 默认 `[text,image]` 的坑(必须显式输出)。
