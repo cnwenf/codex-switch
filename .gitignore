@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.local
+*.log
+.DS_Store
+# 本地配置(含凭证),不进库
+config.local.toml
+# 运行态
+.run/
+run.pid
