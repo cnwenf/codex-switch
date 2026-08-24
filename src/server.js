@@ -27,6 +27,11 @@ import {
   normalizeProvider,
   replaceProvidersRegion,
 } from './provider-config.js';
+import {
+  getProviderPreset,
+  inferProviderType,
+  listProviderPresets,
+} from './provider-registry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 function resolveConfigPath() {
@@ -39,6 +44,7 @@ const CONFIG_PATH = resolveConfigPath();
 const PID_FILE = path.join(os.homedir(), '.codex-switch', 'run.pid');
 const DEFAULT_LISTEN = '127.0.0.1:8787';
 const DEFAULT_MOUNT = '/v1';
+const MAX_ADMIN_BODY_BYTES = 64 * 1024;
 
 // ---------- config + route table (mtime-cached hot reload) ----------
 let cfg = null;
@@ -223,6 +229,17 @@ function envKeyStatus() {
     name,
     configured: Boolean(process.env[name]) || Boolean(fileKeys.get(name)),
   }));
+}
+
+function resolveSavedProviderKey(providerId, requestedProviderType) {
+  if (typeof providerId !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(providerId)) return '';
+  const provider = (getConfig().providers || []).find((entry) => entry?.id === providerId);
+  const savedProviderType = String(provider?.provider_type || '').trim() || inferProviderType(provider?.base_url);
+  if (savedProviderType !== requestedProviderType) return '';
+  const envName = typeof provider?.token_env === 'string' ? provider.token_env : '';
+  if (!ENV_NAME_RE.test(envName)) return '';
+  const value = process.env[envName];
+  return typeof value === 'string' && value.length <= 4096 ? value.trim() : '';
 }
 
 function saveEnvKey(name, value) {
@@ -806,6 +823,7 @@ const HOP_BY_HOP = new Set([
 ]);
 
 function sendJson(res, status, obj) {
+  if (res.destroyed || res.writableEnded) return;
   const body = JSON.stringify(obj);
   res.writeHead(status, {
     'content-type': 'application/json',
@@ -1020,6 +1038,109 @@ function enabledUnion() {
   const c = getConfig();
   const enabled = (c.providers || []).filter((p) => p.enabled !== false);
   return { providers: enabled.length, total: (c.providers || []).length, models: sortSlugsForDisplay([...getRouteTable().keys()]) };
+}
+
+function capabilityCacheSummary(providerId) {
+  const cached = capsCache.get(providerId);
+  if (!cached) return { status: 'missing', model_count: 0, updated_at: null };
+  return {
+    status: Date.now() - cached.at < CAPS_TTL_MS ? 'fresh' : 'stale',
+    model_count: cached.models.size,
+    updated_at: new Date(cached.at).toISOString(),
+  };
+}
+
+function safeProviderOptions(providerType, value) {
+  const preset = getProviderPreset(providerType);
+  const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const output = {};
+  for (const field of preset?.options || []) {
+    const option = input[field.name];
+    if (typeof option === 'string' || typeof option === 'boolean' || (typeof option === 'number' && Number.isFinite(option))) {
+      output[field.name] = option;
+    }
+  }
+  return output;
+}
+
+function projectProviderForAdmin(provider) {
+  const inferredType = String(provider.provider_type || '').trim() || inferProviderType(provider.base_url);
+  let normalized = null;
+  try { normalized = normalizeProvider(provider); } catch { /* Existing malformed entries remain visible but are not trusted. */ }
+  const providerType = normalized?.provider_type || inferredType;
+  const output = {
+    id: String(provider.id || ''),
+    name: String(provider.name || provider.id || ''),
+    provider_type: providerType,
+    provider_options: normalized?.provider_options || safeProviderOptions(providerType, provider.provider_options),
+    base_url: normalized?.base_url || String(provider.base_url || ''),
+    auth: String(provider.auth || 'bearer'),
+    models: Array.isArray(provider.models) ? provider.models.map(String) : [],
+    enabled: provider.enabled !== false,
+    capability_cache: capabilityCacheSummary(provider.id),
+  };
+  if (provider.token_env) output.token_env = String(provider.token_env);
+  return output;
+}
+
+function parseDiscoveryInput(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('invalid request');
+  const providerType = typeof body.provider_type === 'string' ? body.provider_type.trim() : '';
+  const preset = getProviderPreset(providerType);
+  if (!preset || providerType.length > 64) throw new Error('invalid provider type');
+
+  const providerId = body.provider_id === undefined ? '' : String(body.provider_id).trim();
+  if (providerId && !/^[A-Za-z0-9_.-]{1,128}$/.test(providerId)) throw new Error('invalid provider id');
+
+  const rawOptions = body.provider_options === undefined ? {} : body.provider_options;
+  if (!rawOptions || typeof rawOptions !== 'object' || Array.isArray(rawOptions)) {
+    throw new Error('invalid provider options');
+  }
+  const providerOptions = {};
+  for (const field of preset.options) {
+    const value = rawOptions[field.name];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' && typeof value !== 'boolean' && !(typeof value === 'number' && Number.isFinite(value))) {
+      throw new Error('invalid provider option');
+    }
+    providerOptions[field.name] = value;
+  }
+
+  const baseUrl = body.base_url === undefined ? '' : body.base_url;
+  if (typeof baseUrl !== 'string' || baseUrl.length > 4096) throw new Error('invalid base URL');
+  const apiKey = body.api_key === undefined ? '' : body.api_key;
+  if (typeof apiKey !== 'string' || apiKey.length > 4096) throw new Error('invalid API key');
+  return { providerType, providerId, providerOptions, baseUrl, apiKey: apiKey.trim() };
+}
+
+async function discoverProviderForAdmin(req, res, body) {
+  let input;
+  try { input = parseDiscoveryInput(body); } catch {
+    return sendJson(res, 400, { error: 'invalid provider discovery request' });
+  }
+  const explicitKey = input.apiKey;
+  const apiKey = explicitKey || resolveSavedProviderKey(input.providerId, input.providerType);
+  const controller = new AbortController();
+  const abort = () => controller.abort(new Error('admin discovery request closed'));
+  const abortOnClose = () => { if (!res.writableEnded) abort(); };
+  req.once('aborted', abort);
+  res.once('close', abortOnClose);
+  try {
+    const result = await discoverProvider({
+      providerType: input.providerType,
+      providerOptions: input.providerOptions,
+      baseUrl: input.baseUrl,
+      apiKey,
+      signal: controller.signal,
+    });
+    if (input.providerId && result.models.length) cacheDiscoveredModels(input.providerId, result.models);
+    return sendJson(res, 200, result);
+  } catch {
+    return sendJson(res, 500, { error: 'provider discovery failed' });
+  } finally {
+    req.off('aborted', abort);
+    res.off('close', abortOnClose);
+  }
 }
 
 // ---------- admin ----------
@@ -1945,11 +2066,24 @@ async function handleAdmin(req, bodyBuf, res) {
   const p = url.pathname;
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) return sendHtml(res, 200, renderAdminPage());
 
+  if (req.method === 'GET' && p === '/__admin/provider-presets') {
+    return sendJson(res, 200, { ok: true, presets: listProviderPresets() });
+  }
+
+  if (req.method === 'POST' && p === '/__admin/provider-discover'
+    && !String(req.headers['content-type'] || '').toLowerCase().includes('application/json')) {
+    return sendJson(res, 415, { error: 'content type must be application/json' });
+  }
+
   let body = {};
   if (bodyBuf.length && String(req.headers['content-type'] || '').includes('application/json')) {
-    try { body = JSON.parse(bodyBuf.toString('utf8') || '{}'); } catch (e) {
-      return sendJson(res, 400, { error: 'invalid JSON body', detail: String(e.message) });
+    try { body = JSON.parse(bodyBuf.toString('utf8') || '{}'); } catch {
+      return sendJson(res, 400, { error: 'invalid JSON body' });
     }
+  }
+
+  if (req.method === 'POST' && p === '/__admin/provider-discover') {
+    return discoverProviderForAdmin(req, res, body);
   }
 
   // ---------- providers CRUD ----------
@@ -1969,11 +2103,7 @@ async function handleAdmin(req, bodyBuf, res) {
       }
       if (req.method === 'GET' && p === '/__admin/providers') {
         const c = getConfig();
-        const providers = (c.providers || []).map((x) => {
-          const o = { ...x };
-          delete o.token; // 明文密钥绝不回传前端
-          return o;
-        });
+        const providers = (c.providers || []).map(projectProviderForAdmin);
         let officialSync = { modelCount: 0, sources: [] };
         try {
           const oc = officialCatalog();
@@ -2125,13 +2255,27 @@ async function handleAdmin(req, bodyBuf, res) {
 function handle(req, res) {
   const url = new URL(req.url, 'http://x');
   const mountPrefix = getConfig().proxy?.mount_prefix || DEFAULT_MOUNT;
+  const isAdmin = url.pathname === '/' || url.pathname === '/index.html' || url.pathname.startsWith('/__admin');
+  const isProxy = url.pathname.startsWith(mountPrefix);
   const chunks = [];
-  req.on('data', (c) => chunks.push(c));
+  let bodyBytes = 0;
+  let adminBodyTooLarge = false;
+  req.on('data', (c) => {
+    bodyBytes += c.length;
+    if (isAdmin && bodyBytes > MAX_ADMIN_BODY_BYTES) {
+      adminBodyTooLarge = true;
+      chunks.length = 0;
+      return;
+    }
+    if (!adminBodyTooLarge) chunks.push(c);
+  });
   req.on('end', () => {
+    if (adminBodyTooLarge) return sendJson(res, 413, { error: 'request body too large' });
     const bodyBuf = Buffer.concat(chunks);
-    const isAdmin = url.pathname === '/' || url.pathname === '/index.html' || url.pathname.startsWith('/__admin');
-    const isProxy = url.pathname.startsWith(mountPrefix);
-    if (isAdmin) handleAdmin(req, bodyBuf, res).catch((e) => sendJson(res, 500, { error: String(e.message) }));
+    if (isAdmin) handleAdmin(req, bodyBuf, res).catch(() => {
+      console.warn('[codex-switch] admin request failed');
+      sendJson(res, 500, { error: 'internal server error' });
+    });
     else if (isProxy) handleProxy(req, bodyBuf, res).catch((e) => sendJson(res, 500, { error: String(e.message) }));
     else sendJson(res, 404, { error: 'not found', path: url.pathname });
   });
