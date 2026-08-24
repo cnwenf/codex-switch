@@ -6,6 +6,7 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_PAGES = 5;
 const MAX_MODELS = 2_000;
 const MAX_REDIRECTS = 3;
+const MAX_URL_DECODE_DEPTH = 3;
 
 const INPUT_MODALITIES = Object.freeze(['text', 'image', 'audio', 'video', 'file']);
 const OUTPUT_MODALITIES = Object.freeze(['text', 'image', 'audio', 'video']);
@@ -202,11 +203,28 @@ function containsSecretInStringFields(value, apiKey, seen = new Set()) {
   return fields.some((field) => containsSecretInStringFields(field, apiKey, seen));
 }
 
-function decodeUrlComponent(value) {
+function urlComponentIsUnsafe(value, apiKey) {
+  let current = String(value);
+  if (current.includes(apiKey)) return true;
+
+  for (let depth = 0; depth < MAX_URL_DECODE_DEPTH; depth += 1) {
+    let decoded;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      return true;
+    }
+    if (decoded === current) return false;
+    current = decoded;
+    if (current.includes(apiKey)) return true;
+  }
+
+  // The depth bound permits three decoding transformations. Probe once more
+  // without accepting the result so deeper encodings fail closed.
   try {
-    return decodeURIComponent(value);
+    return decodeURIComponent(current) !== current;
   } catch {
-    return null;
+    return true;
   }
 }
 
@@ -214,16 +232,15 @@ function urlContainsExactSecret(url, apiKey) {
   if (typeof apiKey !== 'string' || apiKey.length === 0) return false;
   if (url.href.includes(apiKey)) return true;
 
-  const pathname = decodeUrlComponent(url.pathname);
-  if (pathname === null || pathname.includes(apiKey)) return true;
+  if (url.pathname.split('/').some((segment) => urlComponentIsUnsafe(segment, apiKey))) return true;
 
   for (const [name, value] of url.searchParams) {
-    // URLSearchParams exposes decoded names and values.
-    if (name.includes(apiKey) || value.includes(apiKey)) return true;
+    // URLSearchParams performs the first decode; continue canonicalizing each
+    // name and value independently so nested encodings cannot hide the key.
+    if (urlComponentIsUnsafe(name, apiKey) || urlComponentIsUnsafe(value, apiKey)) return true;
   }
 
-  const hash = decodeUrlComponent(url.hash);
-  return hash === null || hash.includes(apiKey);
+  return urlComponentIsUnsafe(url.hash.slice(1), apiKey);
 }
 
 function protocolCapability(model) {

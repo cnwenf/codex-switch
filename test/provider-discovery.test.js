@@ -12,6 +12,12 @@ const response = (status, body, headers = {}) => new Response(JSON.stringify(bod
   headers: { 'content-type': 'application/json', ...headers },
 });
 
+const percentEncode = (value, depth) => {
+  let encoded = value;
+  for (let index = 0; index < depth; index += 1) encoded = encodeURIComponent(encoded);
+  return encoded;
+};
+
 test('OpenRouter validation and user models normalize capabilities', async () => {
   const calls = [];
   const result = await discoverProvider({
@@ -462,6 +468,31 @@ test('a percent-encoded API key in a same-origin redirect path is rejected befor
   assert.equal(result.validation.status, 'unreachable');
 });
 
+test('double, triple, and over-bound encoded redirect components are rejected', async () => {
+  const apiKey = 'fixture/redirect"layer-key';
+  for (const depth of [2, 3, 5]) {
+    const encoded = percentEncode(apiKey, depth);
+    for (const target of [
+      `https://gateway.example.test/${encoded}/models`,
+      `https://gateway.example.test/models?${encoded}=page`,
+      `https://gateway.example.test/models?cursor=${encoded}`,
+      `https://gateway.example.test/models#${encoded}`,
+    ]) {
+      let calls = 0;
+      const result = await discoverProvider({
+        providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey,
+      }, {
+        fetchImpl: async () => {
+          calls += 1;
+          return new Response(null, { status: 302, headers: { location: target } });
+        },
+      });
+      assert.equal(calls, 1, `depth ${depth}: ${target}`);
+      assert.equal(result.validation.status, 'unreachable');
+    }
+  }
+});
+
 test('cross-origin pagination links cannot forward the bearer key', async () => {
   const calls = [];
   const result = await discoverProvider({
@@ -515,6 +546,109 @@ test('a percent-encoded API key in a pagination query is rejected before the nex
   });
   assert.equal(calls.length, 1);
   assert.equal(result.validation.status, 'unreachable');
+});
+
+test('double, triple, and over-bound encoded pagination components are rejected', async () => {
+  const apiKey = 'fixture/pagination"layer-key';
+  for (const depth of [2, 3, 5]) {
+    const encoded = percentEncode(apiKey, depth);
+    for (const next of [
+      `https://gateway.example.test/${encoded}/models`,
+      `https://gateway.example.test/models?${encoded}=page`,
+      `https://gateway.example.test/models?cursor=${encoded}`,
+      `https://gateway.example.test/models#${encoded}`,
+    ]) {
+      let calls = 0;
+      const result = await discoverProvider({
+        providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey,
+      }, {
+        fetchImpl: async () => {
+          calls += 1;
+          return response(200, { data: [{ id: 'first-page-model' }], next });
+        },
+      });
+      assert.equal(calls, 1, `depth ${depth}: ${next}`);
+      assert.equal(result.validation.status, 'unreachable');
+    }
+  }
+});
+
+test('malformed percent encoding in redirect and pagination path or query fails closed', async () => {
+  for (const flow of ['redirect', 'pagination']) {
+    for (const target of [
+      'https://gateway.example.test/%ZZ/models',
+      'https://gateway.example.test/models?cursor=%ZZ',
+    ]) {
+      let calls = 0;
+      const result = await discoverProvider({
+        providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey: 'fixture-key',
+      }, {
+        fetchImpl: async () => {
+          calls += 1;
+          if (flow === 'redirect') {
+            return new Response(null, { status: 302, headers: { location: target } });
+          }
+          return response(200, { data: [{ id: 'first-page-model' }], next: target });
+        },
+      });
+      assert.equal(calls, 1, `${flow}: ${target}`);
+      assert.equal(result.validation.status, 'unreachable');
+    }
+  }
+});
+
+test('benign encoded pagination components continue to the next page', async () => {
+  const calls = [];
+  const result = await discoverProvider({
+    providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey: 'fixture-key',
+  }, {
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      if (calls.length === 1) {
+        return response(200, {
+          data: [{ id: 'first-page-model' }],
+          next: 'https://gateway.example.test/v1/mo%64els?cursor=page%202&kind=model%2Ftext#page%202',
+        });
+      }
+      return response(200, { data: [{ id: 'second-page-model' }] });
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(result.models.map((model) => model.id), ['first-page-model', 'second-page-model']);
+  assert.equal(result.validation.status, 'valid');
+});
+
+test('nested encoding is rejected for initial and last-id-derived URLs by the shared predicate', async () => {
+  const apiKey = 'fixture/shared/url-key';
+  let initialCalls = 0;
+  const initialResult = await discoverProvider({
+    providerType: 'custom',
+    baseUrl: `https://gateway.example.test/${percentEncode(apiKey, 2)}/v1`,
+    apiKey,
+  }, {
+    fetchImpl: async () => {
+      initialCalls += 1;
+      return response(200, { data: [{ id: 'model' }] });
+    },
+  });
+  assert.equal(initialCalls, 0);
+  assert.equal(initialResult.validation.status, 'unreachable');
+
+  let paginationCalls = 0;
+  const paginationResult = await discoverProvider({
+    providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey,
+  }, {
+    fetchImpl: async () => {
+      paginationCalls += 1;
+      return response(200, {
+        data: [{ id: 'first-page-model' }],
+        has_more: true,
+        last_id: percentEncode(apiKey, 2),
+      });
+    },
+  });
+  assert.equal(paginationCalls, 1);
+  assert.equal(paginationResult.validation.status, 'unreachable');
 });
 
 test('malformed percent encoding is rejected before fetch instead of bypassing URL inspection', async () => {
