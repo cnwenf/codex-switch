@@ -657,6 +657,55 @@ git add src/admin-page.js src/server.js test/admin-page.test.js
 git commit -m "feat: add searchable provider and model setup"
 ```
 
+### Task 6B: Whole-Page Theme, Layout, and Interaction Redesign
+
+**Files:**
+- Modify: `src/admin-page.js`
+- Modify: `test/admin-page.test.js`
+
+**Interfaces:**
+- Consumes: completed Task 6 behavior, `PRODUCT.md`, `DESIGN.md`, Impeccable critique/polish guidance, frontend accessibility patterns, and real-browser screenshots.
+- Produces: a cohesive macOS-oriented local developer-tool theme and layout without changing endpoints, payloads, state transitions, persistence, or provider/model business rules.
+
+- [ ] **Step 1: Capture the current UI and run a structured critique**
+
+Deploy the current page with isolated fixture data. Inspect desktop and narrow layouts in a real browser. Record specific findings for theme, information hierarchy, typography, spacing, density, alignment, navigation, forms, dialogs, provider cards, status treatment, and interaction feedback. Use the Impeccable product-register critique and reject category-reflex “dark AI console” styling.
+
+- [ ] **Step 2: Write visual-contract regression tests**
+
+Add tests that lock down the new design system and accessibility invariants without coupling to incidental pixel values:
+
+- semantic surface/text/accent/status tokens with WCAG AA contrast;
+- clear type and spacing hierarchy;
+- bounded readable content width and responsive breakpoints;
+- consistent control height, focus ring, disabled/reference treatment, and dialog/listbox layering;
+- reduced-motion handling;
+- no gradient text, decorative glass blur, side-stripe cards, nested card grids, or layout-property animation;
+- all pre-existing form IDs, API calls, actions, and state helpers remain present.
+
+Run the focused suite and record RED before changing production styles or markup.
+
+- [ ] **Step 3: Redesign theme and page structure**
+
+Replace the current dark-console theme with a restrained, high-clarity macOS developer-tool system. Improve the top-level page rhythm, navigation, provider summary/list, configuration history, Codex apply/restore area, empty/loading states, and dialog composition. Use deliberate surface layers, readable typography, consistent alignment, fewer unnecessary card boundaries, and status colors reserved for meaning.
+
+Do not change business logic, endpoint paths, request/response bodies, provider compatibility rules, discovery/save gates, or persistence behavior.
+
+- [ ] **Step 4: Refine interaction design**
+
+Polish hover/focus/active/disabled/loading/error states, provider and model combobox affordances, inline validation, selection chips, disclosure behavior, dialogs, toasts, and narrow-screen layout. Preserve all Task 6 keyboard semantics and security invariants. Motion must be short, state-driven, and disabled under `prefers-reduced-motion`.
+
+- [ ] **Step 5: Verify behavior parity and visual quality**
+
+Run Task 5+6 tests and the full suite. In a real browser, compare desktop and narrow screenshots, exercise all primary flows, check overflow/focus/contrast, and confirm no existing action disappeared. Run syntax, diff, DOM-sink, credential, and accessibility scans.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/admin-page.js test/admin-page.test.js
+git commit -m "style: redesign provider management experience"
+```
+
 ### Task 7: Version, Documentation, and Full Automated Verification
 
 **Files:**
