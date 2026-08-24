@@ -978,14 +978,6 @@ main{max-width:1080px;margin:1.5rem auto 2.5rem;padding:0 1.25rem}
 .mtag{display:inline-block;font:11.5px/1.6 var(--mono);padding:.08rem .5rem;border-radius:6px;
   background:rgba(109,141,255,.1);border:1px solid rgba(109,141,255,.28);color:var(--accent2);white-space:nowrap}
 
-.envkeys{display:flex;flex-direction:column;gap:.5rem}
-.envrow{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;padding:.55rem .75rem;
-  border:1px solid var(--border);border-radius:10px;background:var(--bg2)}
-.envname{font-size:.8rem;color:var(--accent2);min-width:13em}
-.envin{flex:1;min-width:220px;background:#0b0e14;color:var(--text);border:1px solid var(--border);
-  border-radius:8px;padding:.4rem .65rem;font:12px/1.6 var(--mono)}
-.envin:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(109,141,255,.14)}
-
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:.9rem}
 .pcard{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--border);border-radius:14px;
   padding:1rem 1.15rem;display:flex;flex-direction:column;gap:.55rem;transition:border-color .15s,opacity .15s}
@@ -1043,6 +1035,8 @@ summary{cursor:pointer;font-size:.82rem;color:var(--muted);user-select:none;list
 summary::-webkit-details-marker{display:none}
 summary:before{content:'▸';color:var(--faint);transition:transform .15s;flex:none}
 details[open] summary:before{transform:rotate(90deg)}
+.advdet{margin:.2rem 0 .5rem}
+.advdet summary{font-size:.76rem}
 pre{font-family:var(--mono);font-size:.75rem;line-height:1.6;background:#0b0e14;border:1px solid var(--border);
   border-radius:10px;padding:.9rem 1rem;overflow:auto;max-height:420px;margin:.6rem 0 0}
 
@@ -1112,13 +1106,8 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
       </div>
     </div>
     <div id="unionChips" class="union-chips"><span class="hint">加载中…</span></div>
-    <section class="card" id="envKeysCard" style="margin-bottom:.9rem;display:none">
-      <div class="card-head"><h2><span class="bar"></span>API 凭证</h2><span class="badge">保存到 ~/.codex-switch/env · chmod 600 · 保存后立即生效</span></div>
-      <div id="envKeysList" class="envkeys"><span class="hint">加载中…</span></div>
-      <p class="note" style="margin-top:.6rem">在下方直接粘贴 Key 并保存即可,无需手工创建环境变量文件。Key 只写入本机 <span class="mono">~/.codex-switch/env</span>(启动时自动装载),保存后立即生效、无需重启;值不会回传页面、不写日志、不进仓库。</p>
-    </section>
     <div id="providerGrid" class="grid"></div>
-    <p class="note">Codex 看到的模型 = 所有「启用」供应商的模型并集。停用供应商不会删除它,只是从路由表和并集中移除。API Key 在上方「API 凭证」栏直接填写;供应商配置里只存环境变量名。</p>
+    <p class="note">Codex 看到的模型 = 所有「启用」供应商的模型并集。停用供应商不会删除它,只是从路由表和并集中移除。API Key 在供应商「编辑」里直接填写(存本机 <span class="mono">~/.codex-switch/env</span>,chmod 600,保存即生效);供应商配置文件里只存环境变量名,不出现明文。</p>
   </section>
 
   <section id="tab-codex" class="pane" style="display:none">
@@ -1169,26 +1158,33 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
 <div id="modalWrap" style="display:none">
   <div id="modal">
     <div class="modal-head"><b id="modalTitle">添加供应商</b><button class="xbtn" onclick="closeModal()">✕</button></div>
-    <div class="frow"><label>ID</label><input id="f-id" class="mono" placeholder="例如 bailian(仅限字母/数字/_/-/.)" spellcheck="false"></div>
-    <div class="frow"><label>名称</label><input id="f-name" placeholder="显示名称,留空同 ID"></div>
-    <div class="frow"><label>认证方式</label>
-      <select id="f-auth" onchange="authChanged()">
-        <option value="bearer">bearer — API Key(走环境变量)</option>
-        <option value="chatgpt_subscription">chatgpt_subscription — ChatGPT 订阅</option>
-        <option value="chatgpt_oauth">chatgpt_oauth — ChatGPT OAuth</option>
-        <option value="passthrough">passthrough — 透传客户端凭证</option>
-      </select>
-    </div>
-    <div class="frow"><label>Base URL</label><input id="f-baseurl" class="mono" placeholder="https://…" spellcheck="false"></div>
-    <div class="frow" id="f-tokenenv-wrap"><label>Token 环境变量名</label>
-      <input id="f-tokenenv" class="mono" placeholder="例如 DASHSCOPE_API_KEY" spellcheck="false">
-      <div class="fhint">密钥本身放在环境变量里(如 ~/.codex-switch/env),这里只填变量名;编辑时清空也保持原值不变。</div>
+    <div class="frow"><label>名称</label><input id="f-name" placeholder="例如 阿里云百炼"></div>
+    <div class="frow"><label>URL</label><input id="f-baseurl" class="mono" placeholder="https://…" spellcheck="false"></div>
+    <div class="frow" id="f-apikey-wrap"><label>API Key</label>
+      <input id="f-apikey" type="password" class="mono" placeholder="在此粘贴 API Key" autocomplete="off" spellcheck="false">
+      <div class="fhint" id="f-apikey-hint">保存后 Key 写入本机 ~/.codex-switch/env(chmod 600),立即生效、无需重启;不回传页面、不写日志、不进仓库。</div>
+      <label class="ck" id="f-apikey-del-wrap" style="display:none;margin-top:.4rem"><input type="checkbox" id="f-apikey-del"> 清除已保存的 Key(该供应商将不可用,直到重新填写)</label>
     </div>
     <div class="frow"><label>模型列表</label>
       <textarea id="f-models" rows="4" placeholder="每行一个模型,或用逗号分隔。例如:&#10;qwen3.8-max&#10;qwen3.7-plus" spellcheck="false"></textarea>
       <div class="fhint">Codex 看到的模型 = 所有启用供应商的模型并集。</div>
     </div>
     <div class="frow"><label class="ck"><input type="checkbox" id="f-enabled" checked> 启用该供应商</label></div>
+    <details class="advdet"><summary>高级选项(ID / 认证方式 / 环境变量名,一般不用动)</summary>
+      <div class="frow"><label>ID</label><input id="f-id" class="mono" placeholder="留空 = 按名称自动生成" spellcheck="false"></div>
+      <div class="frow"><label>认证方式</label>
+        <select id="f-auth" onchange="authChanged()">
+          <option value="bearer">bearer — API Key(最常用)</option>
+          <option value="chatgpt_subscription">chatgpt_subscription — ChatGPT 订阅</option>
+          <option value="chatgpt_oauth">chatgpt_oauth — ChatGPT OAuth</option>
+          <option value="passthrough">passthrough — 透传客户端凭证</option>
+        </select>
+      </div>
+      <div class="frow" id="f-tokenenv-wrap"><label>Token 环境变量名</label>
+        <input id="f-tokenenv" class="mono" placeholder="留空 = 自动生成 <ID>_API_KEY" spellcheck="false">
+        <div class="fhint">配置文件里只存这个变量名,不出现明文 Key。</div>
+      </div>
+    </details>
     <div id="formMsg" class="status"></div>
     <div class="modal-foot">
       <button class="btn" onclick="closeModal()">取消</button>
@@ -1234,7 +1230,7 @@ function loadProviders(){
     CURRENT.union=j.union||{providers:0,total:0,models:[]};
     CURRENT.officialSync=j.officialSync||{modelCount:0,sources:[]};
     CURRENT.envKeys=j.envKeys||[];
-    renderUnion();renderEnvKeys();renderCards();
+    renderUnion();renderCards();
   }).catch(function(e){toast('加载供应商失败: '+e.message,false);});
 }
 function renderUnion(){
@@ -1244,34 +1240,19 @@ function renderUnion(){
   if(!u.models.length){chips.innerHTML='<span class="hint">没有启用的供应商或模型为空,Codex 将看不到任何模型。</span>';return;}
   chips.innerHTML=u.models.map(function(m){return '<span class="mtag" title="'+escH(m)+'">'+escH(prettyName(m))+'</span>';}).join('');
 }
-function renderEnvKeys(){
-  var card=$('envKeysCard');var box=$('envKeysList');
-  var ks=CURRENT.envKeys||[];
-  if(!ks.length){card.style.display='none';return;}
-  card.style.display='';
-  box.innerHTML=ks.map(function(k){
-    var badge=k.configured?'<span class="badge ok">已配置</span>':'<span class="badge warn">未配置</span>';
-    return '<div class="envrow">'
-      +'<span class="envname mono">'+escH(k.name)+'</span>'
-      +badge
-      +'<input type="password" class="envin" id="envin-'+escH(k.name)+'" placeholder="在此粘贴 '+escH(k.name)+' 的值并保存" autocomplete="off" spellcheck="false">'
-      +'<button class="btn small primary" data-envsave="'+escH(k.name)+'">保存</button>'
-      +(k.configured?'<button class="btn small danger" data-envdel="'+escH(k.name)+'">清除</button>':'')
-    +'</div>';
-  }).join('');
+function envKeyConfigured(name){
+  if(!name)return false;
+  var eks=CURRENT.envKeys||[];
+  for(var i=0;i<eks.length;i++){if(eks[i].name===name)return !!eks[i].configured;}
+  return false;
 }
-function saveEnvKeyUI(name){
-  var inp=$('envin-'+name);var v=inp?inp.value.trim():'';
-  if(!v){toast('请先粘贴 Key 的值;要移除请点「清除」',false);return;}
-  api('/__admin/env-keys/save',{name:name,value:v}).then(function(){
-    toast('已保存: '+name+',立即生效(无需重启)');loadProviders();
-  }).catch(function(e){toast('保存失败: '+e.message,false);});
+/* ID/环境变量名自动推导:名称 → slug;slug → <SLUG>_API_KEY */
+function autoId(name){
+  var s=String(name||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');
+  return s||('p-'+Math.random().toString(36).slice(2,7));
 }
-function delEnvKeyUI(name){
-  if(!confirm('确认清除凭证 '+name+'?清除后对应供应商将不可用。'))return;
-  api('/__admin/env-keys/delete',{name:name}).then(function(){
-    toast('已清除: '+name);loadProviders();
-  }).catch(function(e){toast('清除失败: '+e.message,false);});
+function autoTokenEnv(id){
+  return ((String(id||'').toUpperCase().replace(/[^A-Z0-9]+/g,'_'))||'PROVIDER')+'_API_KEY';
 }
 function renderCards(){
   var g=$('providerGrid');var ps=CURRENT.providers;
@@ -1286,11 +1267,9 @@ function cardHtml(p){
   }
   var cred='';
   if(p.token_env){
-    var st=null;var eks=CURRENT.envKeys||[];
-    for(var i=0;i<eks.length;i++){if(eks[i].name===p.token_env){st=eks[i];break;}}
-    cred=(st&&st.configured)
+    cred=envKeyConfigured(p.token_env)
       ?'<span class="cred">env: '+escH(p.token_env)+' · 已配置 ✓</span>'
-      :'<span class="warn-text">env: '+escH(p.token_env)+' · 未配置(在上方「API 凭证」栏填写)</span>';
+      :'<span class="warn-text">env: '+escH(p.token_env)+' · 未配置(点「编辑」填写 API Key)</span>';
   }
   else if(p.auth==='bearer')cred='<span class="warn-text">缺少凭证</span>';
   return '<div class="pcard'+(on?'':' off')+'">'
@@ -1322,11 +1301,20 @@ function delP(id){
 function authChanged(){
   var a=$('f-auth').value;
   $('f-tokenenv-wrap').style.display=(a==='bearer'||a==='chatgpt_oauth')?'':'none';
+  $('f-apikey-wrap').style.display=(a==='bearer')?'':'none';
 }
 function setMsg(msg,ok){
   var el=$('formMsg');
   if(!msg){el.textContent='';el.className='status';return;}
   el.textContent=msg;el.className='status '+(ok===false?'err':'ok');
+}
+function resetApiKeyFields(configured){
+  $('f-apikey').value='';
+  $('f-apikey-del').checked=false;
+  $('f-apikey-del-wrap').style.display=configured?'':'none';
+  $('f-apikey-hint').textContent=configured
+    ?'当前已配置 ✓ 留空 = 保持不变;粘贴新值 = 覆盖。Key 存本机 ~/.codex-switch/env(chmod 600),立即生效。'
+    :'保存后 Key 写入本机 ~/.codex-switch/env(chmod 600),立即生效、无需重启;不回传页面、不写日志、不进仓库。';
 }
 function openAdd(){
   EDITING=null;
@@ -1334,9 +1322,10 @@ function openAdd(){
   $('f-id').value='';$('f-id').readOnly=false;
   $('f-name').value='';$('f-auth').value='bearer';$('f-baseurl').value='';
   $('f-tokenenv').value='';$('f-models').value='';$('f-enabled').checked=true;
+  resetApiKeyFields(false);
   setMsg('');authChanged();
   $('modalWrap').style.display='flex';
-  $('f-id').focus();
+  $('f-name').focus();
 }
 function openEdit(id){
   var p=null;
@@ -1351,30 +1340,54 @@ function openEdit(id){
   $('f-tokenenv').value=p.token_env||'';
   $('f-models').value=(p.models||[]).join('\\n');
   $('f-enabled').checked=p.enabled!==false;
+  resetApiKeyFields(envKeyConfigured(p.token_env));
   setMsg('');authChanged();
   $('modalWrap').style.display='flex';
   $('f-name').focus();
 }
 function closeModal(){$('modalWrap').style.display='none';}
 function saveProvider(){
+  var name=$('f-name').value.trim();
+  var id=$('f-id').value.trim()||autoId(name);   // ID 留空 = 按名称自动生成
   var p={
-    id:$('f-id').value.trim(),
-    name:$('f-name').value.trim(),
+    id:id,
+    name:name,
     auth:$('f-auth').value,
     base_url:$('f-baseurl').value.trim(),
     models:$('f-models').value,
     enabled:$('f-enabled').checked
   };
   var te=$('f-tokenenv').value.trim();
+  if(p.auth==='bearer'&&!te)te=autoTokenEnv(id); // 环境变量名留空 = <ID>_API_KEY
   if(te)p.token_env=te;
-  if(!p.id){setMsg('ID 不能为空',false);return;}
+  if(!name){setMsg('名称不能为空',false);return;}
   var url='/__admin/providers';var body=p;
   if(EDITING!==null){url='/__admin/providers/update';body={origId:EDITING,provider:p};}
+  var keyVal=$('f-apikey').value.trim();      // 只在提交时存在,绝不进 config.toml
+  var keyDel=$('f-apikey-del').checked;
+  var keyOp=(p.auth==='bearer'&&te&&(keyVal||keyDel));
   $('saveBtn').disabled=true;
   api(url,body).then(function(){
-    $('saveBtn').disabled=false;
-    toast(EDITING!==null?'供应商已更新: '+p.id:'供应商已添加: '+p.id);
-    closeModal();loadProviders();
+    if(!keyOp){
+      $('saveBtn').disabled=false;
+      toast(EDITING!==null?'供应商已更新: '+p.id:'供应商已添加: '+p.id);
+      closeModal();loadProviders();
+      return;
+    }
+    // 供应商已落盘(token_env 生效),再处理 Key:清除 或 覆盖保存
+    var kop=(keyDel&&!keyVal)
+      ?api('/__admin/env-keys/delete',{name:te})
+      :api('/__admin/env-keys/save',{name:te,value:keyVal});
+    kop.then(function(){
+      $('saveBtn').disabled=false;
+      var what=(keyDel&&!keyVal)?'Key 已清除':'API Key 已保存,立即生效';
+      toast((EDITING!==null?'供应商已更新: '+p.id+' · ':'供应商已添加: '+p.id+' · ')+what);
+      closeModal();loadProviders();
+    },function(e2){
+      $('saveBtn').disabled=false;
+      setMsg('供应商已保存,但 API Key 操作失败: '+e2.message,false);
+      loadProviders();
+    });
   },function(e){
     $('saveBtn').disabled=false;
     setMsg(e.message,false);
@@ -1390,13 +1403,6 @@ $('providerGrid').addEventListener('click',function(e){
 $('providerGrid').addEventListener('change',function(e){
   var t=e.target;
   if(t&&t.matches&&t.matches('[data-toggle]'))toggleP(t.getAttribute('data-id'),t.checked);
-});
-$('envKeysList').addEventListener('click',function(e){
-  var t=e.target;
-  if(!t||!t.getAttribute)return;
-  var s=t.getAttribute('data-envsave');var d=t.getAttribute('data-envdel');
-  if(s)saveEnvKeyUI(s);
-  if(d)delEnvKeyUI(d);
 });
 function refreshCaps(){
   toast('正在联网获取模型能力…');
