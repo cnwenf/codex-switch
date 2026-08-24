@@ -130,6 +130,34 @@ test('successful model discovery skips model ids and names that echo the API key
   assert.equal(result.warnings.every((warning) => !warning.includes(apiKey)), true);
 });
 
+test('a quote-containing API key skips the unsafe model before dedupe and preserves the safe id', async () => {
+  const apiKey = 'fixture"quoted-key';
+  const result = await discoverProvider({ providerType: 'openai', providerOptions: {}, apiKey }, {
+    fetchImpl: async () => response(200, { data: [
+      { id: `model-${apiKey}`, name: 'Unsafe Model' },
+      { id: 'model-[redacted]', name: 'Safe Model' },
+    ] }),
+  });
+  assert.deepEqual(result.models.map(({ id, name }) => ({ id, name })), [
+    { id: 'model-[redacted]', name: 'Safe Model' },
+  ]);
+  assert.equal(result.warnings.includes('Some model entries containing sensitive data were skipped.'), true);
+});
+
+test('a backslash and newline API key in any normalized string skips the entire model', async () => {
+  const apiKey = 'fixture\\line\nkey';
+  const result = await discoverProvider({ providerType: 'openai', providerOptions: {}, apiKey }, {
+    fetchImpl: async () => response(200, { data: [
+      { id: 'unsafe-name-model', name: `Unsafe ${apiKey}` },
+      { id: 'safe-model', name: 'Safe Model' },
+    ] }),
+  });
+  assert.deepEqual(result.models.map(({ id, name }) => ({ id, name })), [
+    { id: 'safe-model', name: 'Safe Model' },
+  ]);
+  assert.equal(JSON.stringify(result).includes(apiKey), false);
+});
+
 test('generic Models adapters use their resolved endpoint and normalize API identities', async () => {
   const cases = [
     ['openai', {}, '', 'https://api.openai.com/v1/models'],
@@ -380,6 +408,23 @@ test('an API key embedded in the initial URL path is rejected before fetch', asy
   assert.equal(JSON.stringify(result).includes(apiKey), false);
 });
 
+test('a percent-encoded API key in the initial URL path is rejected before fetch', async () => {
+  const apiKey = 'fixture/initial"key';
+  let called = false;
+  const result = await discoverProvider({
+    providerType: 'custom',
+    baseUrl: `https://gateway.example.test/${encodeURIComponent(apiKey)}/v1`,
+    apiKey,
+  }, {
+    fetchImpl: async () => {
+      called = true;
+      return response(200, { data: [{ id: 'model' }] });
+    },
+  });
+  assert.equal(called, false);
+  assert.equal(result.validation.status, 'unreachable');
+});
+
 test('an API key embedded in a same-origin redirect path is rejected before the next fetch', async () => {
   const apiKey = 'fixture-redirect-url-key';
   const calls = [];
@@ -397,6 +442,24 @@ test('an API key embedded in a same-origin redirect path is rejected before the 
   assert.equal(calls.length, 1);
   assert.equal(result.validation.status, 'unreachable');
   assert.equal(JSON.stringify(result).includes(apiKey), false);
+});
+
+test('a percent-encoded API key in a same-origin redirect path is rejected before the next fetch', async () => {
+  const apiKey = 'fixture\\redirect\nkey';
+  const calls = [];
+  const result = await discoverProvider({
+    providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey,
+  }, {
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return new Response(null, {
+        status: 302,
+        headers: { location: `https://gateway.example.test/${encodeURIComponent(apiKey)}/models` },
+      });
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.validation.status, 'unreachable');
 });
 
 test('cross-origin pagination links cannot forward the bearer key', async () => {
@@ -434,6 +497,38 @@ test('an API key embedded in a same-origin pagination path is rejected before th
   assert.equal(calls.length, 1);
   assert.equal(result.validation.status, 'unreachable');
   assert.equal(JSON.stringify(result).includes(apiKey), false);
+});
+
+test('a percent-encoded API key in a pagination query is rejected before the next fetch', async () => {
+  const apiKey = 'fixture/pagination"key';
+  const calls = [];
+  const result = await discoverProvider({
+    providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey,
+  }, {
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return response(200, {
+        data: [{ id: 'first-page-model' }],
+        next: `https://gateway.example.test/v1/models?cursor=${encodeURIComponent(apiKey)}`,
+      });
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.validation.status, 'unreachable');
+});
+
+test('malformed percent encoding is rejected before fetch instead of bypassing URL inspection', async () => {
+  let called = false;
+  const result = await discoverProvider({
+    providerType: 'custom', baseUrl: 'https://gateway.example.test/%ZZ/v1', apiKey: 'fixture-key',
+  }, {
+    fetchImpl: async () => {
+      called = true;
+      return response(200, { data: [{ id: 'model' }] });
+    },
+  });
+  assert.equal(called, false);
+  assert.equal(result.validation.status, 'unreachable');
 });
 
 test('oversized responses fail safely without returning body or secret material', async () => {

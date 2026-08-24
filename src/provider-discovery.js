@@ -193,21 +193,37 @@ function preferKnown(...values) {
   return values.find((value) => value !== UNKNOWN) ?? UNKNOWN;
 }
 
-function containsExactSecret(value, apiKey) {
-  return typeof apiKey === 'string' && apiKey.length > 0 && String(value).includes(apiKey);
+function containsSecretInStringFields(value, apiKey, seen = new Set()) {
+  if (typeof apiKey !== 'string' || apiKey.length === 0) return false;
+  if (typeof value === 'string') return value.includes(apiKey);
+  if (!value || typeof value !== 'object' || seen.has(value)) return false;
+  seen.add(value);
+  const fields = Array.isArray(value) ? value : Object.values(value);
+  return fields.some((field) => containsSecretInStringFields(field, apiKey, seen));
 }
 
-function redactExactSecret(value, apiKey) {
-  if (!apiKey) return value;
-  if (typeof value === 'string') return value.replaceAll(apiKey, '[redacted]');
-  if (Array.isArray(value)) return value.map((item) => redactExactSecret(item, apiKey));
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-      key,
-      redactExactSecret(item, apiKey),
-    ]));
+function decodeUrlComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
   }
-  return value;
+}
+
+function urlContainsExactSecret(url, apiKey) {
+  if (typeof apiKey !== 'string' || apiKey.length === 0) return false;
+  if (url.href.includes(apiKey)) return true;
+
+  const pathname = decodeUrlComponent(url.pathname);
+  if (pathname === null || pathname.includes(apiKey)) return true;
+
+  for (const [name, value] of url.searchParams) {
+    // URLSearchParams exposes decoded names and values.
+    if (name.includes(apiKey) || value.includes(apiKey)) return true;
+  }
+
+  const hash = decodeUrlComponent(url.hash);
+  return hash === null || hash.includes(apiKey);
 }
 
 function protocolCapability(model) {
@@ -361,7 +377,7 @@ function normalizeModels(rawModels, providerType, source, warnings, apiKey) {
     const normalized = source === 'api'
       ? mergeNormalizedModel(apiModel, staticModels.get(apiModel.id), raw)
       : apiModel;
-    if (containsExactSecret(JSON.stringify(normalized), apiKey)) {
+    if (containsSecretInStringFields(normalized, apiKey)) {
       unsafe += 1;
       continue;
     }
@@ -475,7 +491,7 @@ async function readBoundedResponse(response, signal) {
 
 async function requestJson(context, initialUrl) {
   let url = validateDiscoveryUrl(initialUrl, context.providerType);
-  if (containsExactSecret(url.toString(), context.apiKey)) throw new DiscoverySafetyError('unsafe_url');
+  if (urlContainsExactSecret(url, context.apiKey)) throw new DiscoverySafetyError('unsafe_url');
   const initialClass = destinationClass(url);
   const initialOrigin = url.origin;
   for (let redirects = 0; ; redirects += 1) {
@@ -501,7 +517,7 @@ async function requestJson(context, initialUrl) {
       } catch {
         throw new DiscoverySafetyError('unsafe_redirect');
       }
-      if (containsExactSecret(next.toString(), context.apiKey)) throw new DiscoverySafetyError('unsafe_redirect');
+      if (urlContainsExactSecret(next, context.apiKey)) throw new DiscoverySafetyError('unsafe_redirect');
       if (destinationClass(next) !== initialClass || next.origin !== initialOrigin) {
         throw new DiscoverySafetyError('unsafe_redirect');
       }
@@ -530,16 +546,16 @@ function nextPageUrl(body, currentUrl, apiKey) {
     if (resolved.origin !== current.origin
       || resolved.username
       || resolved.password
-      || containsExactSecret(resolved.toString(), apiKey)) {
+      || urlContainsExactSecret(resolved, apiKey)) {
       throw new DiscoverySafetyError('unsafe_pagination');
     }
     return resolved.toString();
   }
   if (body?.has_more && typeof body?.last_id === 'string' && body.last_id) {
-    if (containsExactSecret(body.last_id, apiKey)) throw new DiscoverySafetyError('unsafe_pagination');
+    if (containsSecretInStringFields(body.last_id, apiKey)) throw new DiscoverySafetyError('unsafe_pagination');
     const url = new URL(currentUrl);
     url.searchParams.set('after', body.last_id);
-    if (containsExactSecret(url.toString(), apiKey)) throw new DiscoverySafetyError('unsafe_pagination');
+    if (urlContainsExactSecret(url, apiKey)) throw new DiscoverySafetyError('unsafe_pagination');
     return url.toString();
   }
   return null;
@@ -764,21 +780,21 @@ export async function discoverProvider(input, dependencies = {}) {
       warnings,
       context.apiKey,
     );
-    return redactExactSecret({
+    return {
       validation: discovered.validation || { status: 'valid', message: 'Credentials and discovery endpoint were accepted.' },
       compatibility: preset.compatibility,
       models,
       modelSource: discovered.modelSource,
       warnings,
-    }, context.apiKey);
+    };
   } catch (error) {
-    return redactExactSecret({
+    return {
       validation: mapDiscoveryError(error),
       compatibility: preset.compatibility,
       models: [],
       modelSource: 'manual',
       warnings,
-    }, context.apiKey);
+    };
   } finally {
     timeout.done();
   }
