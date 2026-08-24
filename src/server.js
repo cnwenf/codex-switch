@@ -1218,8 +1218,8 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
     <div id="historyList"></div>
     <section class="card" style="margin-top:1rem">
       <div class="card-head"><h2><span class="bar"></span>Codex 注入配置</h2></div>
-      <p class="note">「一键还原」= 取最新备份覆盖回 <code>~/.codex/</code>,移除 codex-switch 注入的 model_provider / model_catalog_json 等配置段与 catalog 合并条目;官方自有内容一字节不动。还原后重启 Codex 生效。</p>
-      <div class="pane-actions"><button class="btn danger" onclick="restoreCodex()">一键还原</button></div>
+      <p class="note">「应用并备份」= 把当前路由写入 <code>~/.codex/</code>(model_provider / model_catalog_json + catalog 合并),改动前自动备份,官方自有内容一字节不动,写入后重启 Codex 生效。「一键还原」= 取最新备份覆盖回 <code>~/.codex/</code>,移除注入的配置段与 catalog 合并条目。</p>
+      <div class="pane-actions"><button class="btn primary" onclick="applyCodex()">应用并备份</button><button class="btn danger" onclick="restoreCodex()">一键还原</button></div>
       <div id="codexStatus" class="status muted"></div>
       <div style="margin-top:.8rem;padding-top:.7rem;border-top:1px dashed var(--border)">
         <label style="display:flex;gap:.5rem;align-items:center;cursor:pointer;font-size:.85rem">
@@ -1533,6 +1533,16 @@ $('historyList').addEventListener('click',function(e){
 
 /* ---------- Codex 注入配置:一键还原(已并入「配置历史」页签) ---------- */
 function setCodexStatus(cls,msg){var el=$('codexStatus');if(el){el.className='status '+cls;el.textContent=msg;}}
+function applyCodex(){
+  setCodexStatus('muted','正在写入 ~/.codex/(改动前自动备份)…');
+  api('/__admin/codex-apply',{}).then(function(j){
+    if(j.ok===false){setCodexStatus('err','✗ 应用失败: '+j.error+(j.detail?'('+j.detail+')':''));return;}
+    var bk=(j.backups&&j.backups.length)?j.backups.map(function(x){return x.file+' → '+x.backup;}).join(', '):'(无可备份文件)';
+    var pre=j.preserved||{};
+    var sec=(pre.configSectionsAfter!=null)?(' · Codex 原有配置保留 '+pre.configSectionsAfter+' 段'):'';
+    setCodexStatus('ok','✓ 已应用,备份: '+bk+sec+' — 重启 Codex 生效');
+  }).catch(function(e){setCodexStatus('err','✗ 应用失败: '+e.message);});
+}
 function restoreCodex(){
   setCodexStatus('muted','正在还原最新备份…');
   api('/__admin/codex-restore',{}).then(function(j){
