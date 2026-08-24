@@ -5,9 +5,10 @@
 //  - 状态栏小图标:服务可达=正常,不可达=图标变暗;
 //  - 每 5s 轮询 /__admin/health,菜单里显示 版本·供应商数·模型数·运行时长;
 //  - 菜单:打开配置页 / 检查更新(发现新版可一键触发 /__admin/update/run)/ 隐藏图标 / 退出;
-//  - 「退出」= 向父进程(启动器)发 SIGTERM,由其先还原注入的 Codex 配置再停服务;
-//  - 父进程(启动器)消失后自动退出,不留孤儿图标;
-//  - 无 Dock 图标、无窗口:activation policy = accessory。
+//  - 「退出」= 向启动器(--launcher-pid)发 SIGTERM,由其先还原注入的 Codex 配置再停服务;
+//  - 启动器消失后自动退出,不留孤儿图标(按 launcher pid 或 ppid 检测);
+//  - 打包为独立 LSUIElement=true 小 .app(自己的 bundle id):无 Dock 图标、无窗口,
+//    由启动器用 open 拉起,独立 ASN,accessory 策略不会把主 App 拖成 UIElement。
 
 import AppKit
 import Foundation
@@ -23,6 +24,8 @@ func argValue(_ name: String) -> String? {
 
 let port = argValue("--port") ?? "8787"
 let baseURL = "http://127.0.0.1:\(port)"
+// 启动器经 open --args 传入自身 pid:open 启动时 ppid 是 launchd,退出/孤儿检测必须靠自己记 pid
+let launcherPid: Int32? = argValue("--launcher-pid").flatMap { Int32($0) }
 
 // 菜单栏图标:与 App 图标(logo.svg)同形 —— 左侧入口 → 中间分支点 → 两个向右箭头。
 // 自定义绘制(不依赖 SF Symbol 的方向变体),模板模式自动适配深/浅色菜单栏。
@@ -104,8 +107,12 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     poll()
   }
 
-  // 父进程(启动器)已不在 → App 已退出,自动撤离(防 kill -9 后残留孤儿图标)
-  private func orphaned() -> Bool { getppid() == 1 }
+  // 启动器已不在 → App 已退出,自动撤离(防 kill -9 后残留孤儿图标)
+  // 经 open 启动时 ppid 恒为 1,必须按 --launcher-pid 判断;未传 pid(旧启动器直启)回退 ppid 检测。
+  private func orphaned() -> Bool {
+    if let pid = launcherPid { return kill(pid, 0) != 0 }
+    return getppid() == 1
+  }
 
   private func poll() {
     if orphaned() { NSApp.terminate(nil); return }
@@ -144,10 +151,11 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
 
   @objc private func hideIcon() { NSApp.terminate(nil) }
 
-  // 退出:给父进程(启动器)发 SIGTERM —— 启动器的 trap 会先调 /__admin/codex-restore
-  // 把注入的 Codex 配置还原(最新备份覆盖回 ~/.codex/),再停掉服务与本菜单栏进程。
+  // 退出:给启动器发 SIGTERM —— 启动器的 trap 会先调 /__admin/codex-restore
+  // 把注入的 Codex 配置还原(手术式剥离注入项),再停掉服务与本菜单栏进程。
+  // 经 open 启动时 ppid 是 launchd,必须用 --launcher-pid;未传 pid 时回退父进程(兼容旧启动器)。
   @objc private func quitApp() {
-    kill(getppid(), SIGTERM)
+    if let pid = launcherPid { kill(pid, SIGTERM) } else { kill(getppid(), SIGTERM) }
     NSApp.terminate(nil)
   }
 

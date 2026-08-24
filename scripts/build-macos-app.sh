@@ -79,17 +79,21 @@ PORT=$(sed -n 's/^listen *= *"[0-9.]*:\([0-9]*\)"/\1/p' "$CFG" 2>/dev/null | hea
 PORT="${PORT:-8787}"
 URL="http://127.0.0.1:$PORT/"
 mkdir -p "$HOME/.codex-switch"
-MB_SRC="$DIR/../Resources/CodexSwitchMenuBar"
-MB_BIN="$HOME/.codex-switch/CodexSwitchMenuBar"
+MB_APP_SRC="$DIR/../Resources/CodexSwitchMenuBar.app"
+MB_APP_DST="$HOME/.codex-switch/CodexSwitchMenuBar.app"
 start_menubar() {
-  # 先拷贝到用户目录再启动:菜单栏进程若从 .app 包内启动,其
-  # setActivationPolicy(.accessory) 会把整个 App 降级为 UIElement,
-  # 导致 Dock/⌘Tab 里看不到本应用。从包外启动则互不影响。
-  [ -x "$MB_SRC" ] || return 0
-  cp -f "$MB_SRC" "$MB_BIN" 2>/dev/null || return 0
-  chmod +x "$MB_BIN" 2>/dev/null || return 0
-  "$MB_BIN" --port "$PORT" >/dev/null 2>&1 &
-  MB_PID=$!
+  # 菜单栏是独立的 LSUIElement=true 小 .app(自己的 bundle id):
+  # 必须用 open 作为独立 App 启动(独立 LaunchServices ASN);若直接作为
+  # 本应用的子进程启动,macOS 会把它归入本应用 ASN,其 accessory 策略
+  # 会把主 App 拖成 UIElement,导致 Dock/⌘Tab 里看不到本应用。
+  [ -d "$MB_APP_SRC" ] || return 0
+  pkill -f "CodexSwitchMenuBar.app/Contents/MacOS" 2>/dev/null
+  sleep 0.3
+  rm -rf "$MB_APP_DST" 2>/dev/null
+  cp -R "$MB_APP_SRC" "$MB_APP_DST" 2>/dev/null || return 0
+  open -g "$MB_APP_DST" --args --port "$PORT" --launcher-pid "$$" 2>/dev/null || return 0
+  sleep 0.6
+  MB_PID=$(pgrep -f "CodexSwitchMenuBar.app/Contents/MacOS" | head -1)
 }
 if lsof -tnP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   open "$URL"   # 已有实例在跑(源码安装或另一个 App 实例),直接打开管理页
@@ -103,7 +107,8 @@ stop_all() {
   # 退出前先还原官方 Codex 配置(撤销本应用注入的代理设置)
   curl -fsS -m 8 -X POST "http://127.0.0.1:$PORT/__admin/codex-restore" >> "$HOME/.codex-switch/run.log" 2>&1 || true
   kill $SERVER_PID 2>/dev/null
-  [ -n "${MB_PID:-}" ] && kill $MB_PID 2>/dev/null
+  # 菜单栏是独立小 .app(open 启动):优先按记录 PID 杀,兜底按进程名
+  { [ -n "${MB_PID:-}" ] && kill "$MB_PID" 2>/dev/null; } || pkill -f "CodexSwitchMenuBar.app/Contents/MacOS" 2>/dev/null
   exit 0
 }
 trap stop_all TERM INT
@@ -120,13 +125,35 @@ LAUNCHER
 chmod +x "$MACOS_DIR/codex-switch-launcher"
 
 # ---------- 5.5 菜单栏小程序(可选;无 swiftc 时跳过,App 其余功能不受影响) ----------
+# 打成独立 LSUIElement=true 的 .app(自己的 bundle id):启动器用 open 拉起,
+# 拥有独立 LaunchServices ASN,其 accessory 策略不会把主 App 拖成 UIElement(Dock 可见)。
 MB_SRC=assets/menubar/CodexSwitchMenuBar.swift
-MB_BIN="$RES/CodexSwitchMenuBar"
+MB_APP="$RES/CodexSwitchMenuBar.app"
 if [ -f "$MB_SRC" ] && command -v swiftc >/dev/null 2>&1; then
-  if swiftc -O -framework AppKit "$MB_SRC" -o "$MB_BIN" 2>/dev/null; then
-    chmod +x "$MB_BIN"
-    codesign --force --sign - "$MB_BIN" 2>/dev/null || true
-    echo "[build] menubar app built: CodexSwitchMenuBar"
+  if swiftc -O -framework AppKit "$MB_SRC" -o "$DIST/mb-bin" 2>/dev/null; then
+    mkdir -p "$MB_APP/Contents/MacOS"
+    mv "$DIST/mb-bin" "$MB_APP/Contents/MacOS/CodexSwitchMenuBar"
+    chmod +x "$MB_APP/Contents/MacOS/CodexSwitchMenuBar"
+    cat > "$MB_APP/Contents/Info.plist" <<'MBPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>CodexSwitchMenuBar</string>
+  <key>CFBundleDisplayName</key><string>CodexSwitchMenuBar</string>
+  <key>CFBundleIdentifier</key><string>com.cnwenf.codex-switch.menubar</string>
+  <key>CFBundleExecutable</key><string>CodexSwitchMenuBar</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>1.0</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+MBPLIST
+    codesign --force --sign - "$MB_APP" 2>/dev/null || true
+    echo "[build] menubar app built: CodexSwitchMenuBar.app (LSUIElement)"
   else
     echo "[build] WARN: menubar app build failed(App 仍可用,只是没有状态栏图标)" >&2
   fi
