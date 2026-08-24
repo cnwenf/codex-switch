@@ -58,6 +58,7 @@ function providerBlock({
   enabled = false,
   providerType,
   providerOptions,
+  models = [],
 }) {
   const lines = [
     '[[providers]]',
@@ -75,7 +76,7 @@ function providerBlock({
     `base_url = ${JSON.stringify(baseUrl)}`,
     'auth = "bearer"',
     `token_env = ${JSON.stringify(tokenEnv)}`,
-    'models = []',
+    `models = [${models.map((model) => JSON.stringify(model)).join(', ')}]`,
     `enabled = ${enabled}`,
   );
   return lines.join('\n');
@@ -173,7 +174,7 @@ test('editing reuses only the saved provider token_env and exposes a safe cache 
   const savedKey = 'fixture-saved-provider-secret';
   const arbitraryKey = 'fixture-arbitrary-environment-secret';
   const app = await startCodexSwitchFixture(t, {
-    providers: [{ id: 'saved-custom', tokenEnv: 'SAVED_FIXTURE_KEY' }],
+    providers: [{ id: 'saved-custom', tokenEnv: 'SAVED_FIXTURE_KEY', enabled: true }],
     childEnv: {
       SAVED_FIXTURE_KEY: savedKey,
       ARBITRARY_FIXTURE_KEY: arbitraryKey,
@@ -245,6 +246,135 @@ test('a saved key cannot be reused under a different provider type', async (t) =
   assert.equal(app.upstreamRequests.length, 0);
   assert.equal(JSON.stringify(result).includes(savedKey), false);
   assert.equal(app.output().includes(savedKey), false);
+});
+
+test('an explicit key cannot cache Custom discovery under a saved provider of another type', async (t) => {
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'saved-xai',
+      providerType: 'xai',
+      providerOptions: {},
+      baseUrl: 'https://api.x.ai/v1',
+      tokenEnv: 'SAVED_XAI_FIXTURE_KEY',
+      enabled: true,
+      models: ['fixture-model'],
+    }],
+    upstreamHandler(req, res) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{
+        id: 'fixture-model',
+        context_window: 424242,
+        input_modalities: ['text', 'image'],
+      }] }));
+    },
+  });
+  const response = await postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'saved-xai',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/v1`,
+    api_key: 'fixture-explicit-cross-type-secret',
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).validation.status, 'valid');
+
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  const saved = providers.providers.find((provider) => provider.id === 'saved-xai');
+  assert.deepEqual(saved.capability_cache, { status: 'missing', model_count: 0, updated_at: null });
+  const generated = await fetch(`${app.origin}/__admin/codex-config`).then((res) => res.json());
+  const catalog = JSON.parse(generated.catalog_json);
+  assert.notEqual(catalog.models.find((model) => model.slug === 'fixture-model').context_window, 424242);
+});
+
+test('an explicit key cannot seed cache for a provider id that does not exist yet', async (t) => {
+  const app = await startCodexSwitchFixture(t, {
+    upstreamHandler(req, res) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'fixture-model', context_window: 424242 }] }));
+    },
+  });
+  const discovery = await postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'future-custom',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/v1`,
+    api_key: 'fixture-explicit-future-secret',
+  });
+  assert.equal(discovery.status, 200);
+  assert.equal((await discovery.json()).validation.status, 'valid');
+
+  const added = await postJson(app.origin, '/__admin/providers', {
+    id: 'future-custom',
+    name: 'Future Custom',
+    provider_type: 'custom',
+    provider_options: { base_url: `${app.upstreamOrigin}/v1` },
+    base_url: `${app.upstreamOrigin}/v1`,
+    auth: 'bearer',
+    token_env: 'FUTURE_CUSTOM_FIXTURE_KEY',
+    models: ['fixture-model'],
+    enabled: true,
+  });
+  assert.equal(added.status, 200);
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  const saved = providers.providers.find((provider) => provider.id === 'future-custom');
+  assert.deepEqual(saved.capability_cache, { status: 'missing', model_count: 0, updated_at: null });
+  const generated = await fetch(`${app.origin}/__admin/codex-config`).then((res) => res.json());
+  const catalog = JSON.parse(generated.catalog_json);
+  assert.notEqual(catalog.models.find((model) => model.slug === 'fixture-model').context_window, 424242);
+});
+
+test('an explicit key caches discovery for the enabled saved provider with the same type', async (t) => {
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'saved-custom',
+      providerType: 'custom',
+      providerOptions: { base_url: '' },
+      tokenEnv: 'SAVED_CUSTOM_FIXTURE_KEY',
+      enabled: true,
+      models: ['fixture-model'],
+    }],
+    upstreamHandler(req, res) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'fixture-model', context_window: 424242 }] }));
+    },
+  });
+  const response = await postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'saved-custom',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/v1`,
+    api_key: 'fixture-explicit-same-type-secret',
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).validation.status, 'valid');
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  const saved = providers.providers.find((provider) => provider.id === 'saved-custom');
+  assert.equal(saved.capability_cache.status, 'fresh');
+  assert.equal(saved.capability_cache.model_count, 1);
+  const generated = await fetch(`${app.origin}/__admin/codex-config`).then((res) => res.json());
+  const catalog = JSON.parse(generated.catalog_json);
+  assert.equal(catalog.models.find((model) => model.slug === 'fixture-model').context_window, 424242);
+});
+
+test('an explicit key cannot cache discovery for a disabled saved provider', async (t) => {
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'disabled-custom',
+      providerType: 'custom',
+      providerOptions: { base_url: '' },
+      tokenEnv: 'DISABLED_CUSTOM_FIXTURE_KEY',
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+  });
+  const response = await postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'disabled-custom',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/v1`,
+    api_key: 'fixture-explicit-disabled-secret',
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).validation.status, 'valid');
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  const saved = providers.providers.find((provider) => provider.id === 'disabled-custom');
+  assert.deepEqual(saved.capability_cache, { status: 'missing', model_count: 0, updated_at: null });
 });
 
 test('discovery maps upstream status without exposing upstream errors or secrets', async (t) => {

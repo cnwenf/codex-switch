@@ -242,6 +242,14 @@ function resolveSavedProviderKey(providerId, requestedProviderType) {
   return typeof value === 'string' && value.length <= 4096 ? value.trim() : '';
 }
 
+function resolveDiscoveryCacheProvider(providerId, requestedProviderType) {
+  if (typeof providerId !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(providerId)) return null;
+  const provider = (getConfig().providers || []).find((entry) => entry?.id === providerId);
+  if (!provider || provider.enabled === false) return null;
+  const savedProviderType = String(provider.provider_type || '').trim() || inferProviderType(provider.base_url);
+  return savedProviderType === requestedProviderType ? provider : null;
+}
+
 function saveEnvKey(name, value) {
   if (!ENV_NAME_RE.test(name)) throw new Error('非法的环境变量名');
   if (!allowedEnvNames().has(name)) throw new Error(`环境变量 '${name}' 未被任何供应商的 token_env 引用,拒绝写入`);
@@ -1133,7 +1141,8 @@ async function discoverProviderForAdmin(req, res, body) {
       apiKey,
       signal: controller.signal,
     });
-    if (input.providerId && result.models.length) cacheDiscoveredModels(input.providerId, result.models);
+    const cacheProvider = resolveDiscoveryCacheProvider(input.providerId, input.providerType);
+    if (cacheProvider && result.models.length) cacheDiscoveredModels(cacheProvider.id, result.models);
     return sendJson(res, 200, result);
   } catch {
     return sendJson(res, 500, { error: 'provider discovery failed' });
