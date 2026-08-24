@@ -8,6 +8,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import TOML from '@iarna/toml';
@@ -232,6 +233,102 @@ function deleteEnvKey(name) {
   delete process.env[name];
   console.log(`[codex-switch] env key removed: ${name}`);
   return { ok: true, name, removed };
+}
+
+// ---------- 开机自动启动 (macOS LaunchAgent) ----------
+// 登录项 = ~/Library/LaunchAgents/com.cnwenf.codex-switch.plist(RunAtLoad=true)。
+// 入口按运行形态自适应:.app 打包 → bundle 内 launcher;源码安装 → scripts/start.sh。
+// KeepAlive=false 是刻意的:只管「登录时拉起」,不做进程守护,避免干扰手动停止/开发重启。
+// 默认开启:首次启动(无 plist 且无显式关闭标记)自动写入;写文件不 bootstrap,下次登录生效。
+const AUTOSTART_LABEL = 'com.cnwenf.codex-switch';
+const AUTOSTART_PLIST = path.join(os.homedir(), 'Library', 'LaunchAgents', `${AUTOSTART_LABEL}.plist`);
+const AUTOSTART_OFF_MARKER = path.join(os.homedir(), '.codex-switch', '.autostart-off');
+
+function autostartSupported() { return process.platform === 'darwin'; }
+
+function autostartProgramArgs() {
+  if (process.execPath.includes(`.app${path.sep}Contents${path.sep}`)) {
+    // .app 打包模式:execPath = .../Codex Switch.app/Contents/MacOS/node
+    return [path.join(path.dirname(process.execPath), 'codex-switch-launcher')];
+  }
+  return ['/bin/sh', path.resolve(__dirname, '..', 'scripts', 'start.sh')];
+}
+
+function xmlEscape(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildAutostartPlist() {
+  const args = autostartProgramArgs().map((a) => `    <string>${xmlEscape(a)}</string>`).join('\n');
+  const logDir = path.join(os.homedir(), '.codex-switch');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${AUTOSTART_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+${args}
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>${xmlEscape(path.join(logDir, 'launchd.out.log'))}</string>
+  <key>StandardErrorPath</key>
+  <string>${xmlEscape(path.join(logDir, 'launchd.err.log'))}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
+`;
+}
+
+function autostartStatus() {
+  return {
+    supported: autostartSupported(),
+    enabled: autostartSupported() && fs.existsSync(AUTOSTART_PLIST),
+    plist: AUTOSTART_PLIST,
+    entry: autostartProgramArgs().join(' '),
+  };
+}
+
+function setAutostart(enabled) {
+  if (!autostartSupported()) throw new Error('开机自动启动仅支持 macOS');
+  if (enabled) {
+    fs.mkdirSync(path.dirname(AUTOSTART_PLIST), { recursive: true });
+    fs.writeFileSync(AUTOSTART_PLIST, buildAutostartPlist(), { mode: 0o644 });
+    try { fs.unlinkSync(AUTOSTART_OFF_MARKER); } catch {}
+    console.log(`[codex-switch] autostart enabled: ${AUTOSTART_PLIST}`);
+  } else {
+    try { fs.unlinkSync(AUTOSTART_PLIST); } catch {}
+    fs.mkdirSync(path.dirname(AUTOSTART_OFF_MARKER), { recursive: true });
+    fs.writeFileSync(AUTOSTART_OFF_MARKER, new Date().toISOString() + '\n', { mode: 0o600 });
+    console.log('[codex-switch] autostart disabled (plist removed, off-marker written)');
+  }
+  return { ok: true, ...autostartStatus() };
+}
+
+function ensureDefaultAutostart() {
+  // 默认开启 + 入口自愈:未显式关闭(无 off 标记)时,每次启动按当前运行形态重写 plist。
+  // 这样在 源码 ↔ .app 之间切换、或程序路径变化后,登录项永远指向正确的入口。
+  // 只写文件、不 bootstrap:当前进程已在监听,登录项下次登录生效。
+  if (!autostartSupported()) return;
+  if (fs.existsSync(AUTOSTART_OFF_MARKER)) return;
+  try {
+    fs.mkdirSync(path.dirname(AUTOSTART_PLIST), { recursive: true });
+    fs.writeFileSync(AUTOSTART_PLIST, buildAutostartPlist(), { mode: 0o644 });
+    console.log(`[codex-switch] autostart ensured: ${AUTOSTART_PLIST} → ${autostartProgramArgs().join(' ')} (RunAtLoad, 下次登录生效)`);
+  } catch (e) {
+    console.warn(`[codex-switch] autostart setup failed: ${e.message}`);
+  }
 }
 
 // ---------- codex 侧配置:官方订阅检测 + 一键应用/备份/还原 ----------
@@ -1120,6 +1217,13 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
         <button class="btn primary" onclick="applyCodex()">应用并备份</button>
         <button class="btn danger" onclick="restoreCodex()">一键还原</button>
       </div>
+      <div style="margin-top:.8rem;padding-top:.7rem;border-top:1px dashed var(--border)">
+        <label style="display:flex;gap:.5rem;align-items:center;cursor:pointer;font-size:.85rem">
+          <input type="checkbox" id="autostartChk" onchange="toggleAutostart()">
+          <span>开机 / 登录时自动启动服务 <span class="muted">(macOS LaunchAgent,默认开启)</span></span>
+        </label>
+        <div id="autostartInfo" class="status muted"></div>
+      </div>
     </section>
     <section class="card">
       <div class="card-head"><h2><span class="bar"></span>官方订阅</h2><span id="subStatus" class="badge">检测中…</span></div>
@@ -1504,9 +1608,30 @@ function restoreCodex(){
   }).catch(function(e){setCodexStatus('err','✗ 还原失败: '+e.message);});
 }
 
+/* ---------- 开机自动启动 (macOS LaunchAgent) ---------- */
+function loadAutostart(){
+  api('/__admin/autostart').then(function(j){
+    var chk=$('autostartChk');var info=$('autostartInfo');
+    if(!chk)return;
+    if(!j.supported){chk.disabled=true;chk.checked=false;if(info)info.textContent='自动启动仅支持 macOS(LaunchAgent),当前系统不支持。';return;}
+    chk.checked=!!j.enabled;
+    if(info)info.textContent=j.enabled?('✓ 已启用 · '+j.plist+' → '+j.entry):('已关闭 · 勾选后写入 '+j.plist+',下次登录自动启动');
+  }).catch(function(e){var info=$('autostartInfo');if(info)info.textContent='读取自动启动状态失败: '+e.message;});
+}
+function toggleAutostart(){
+  var chk=$('autostartChk');if(!chk||chk.disabled)return;
+  chk.disabled=true;
+  api('/__admin/autostart',{enabled:chk.checked}).then(function(j){
+    chk.disabled=false;chk.checked=!!j.enabled;
+    toast(j.enabled?'开机自动启动已开启':'开机自动启动已关闭');
+    loadAutostart();
+  }).catch(function(e){chk.disabled=false;setMsg(e.message,false);loadAutostart();});
+}
+
 loadProviders();
 loadCodexStatus();
 loadCodexPreview();
+loadAutostart();
 </script>
 </body></html>`;
 }
@@ -1569,6 +1694,21 @@ async function handleAdmin(req, bodyBuf, res) {
       }
       if (req.method === 'POST' && p === '/__admin/env-keys/delete') {
         return sendJson(res, 200, deleteEnvKey(String(body.name || '')));
+      }
+    } catch (e) {
+      return sendJson(res, 400, { error: String(e.message) });
+    }
+    return sendJson(res, 404, { error: 'not found', path: p });
+  }
+
+  // ---------- 开机自动启动 (macOS LaunchAgent) ----------
+  if (p.startsWith('/__admin/autostart')) {
+    try {
+      if (req.method === 'GET' && p === '/__admin/autostart') {
+        return sendJson(res, 200, { ok: true, ...autostartStatus() });
+      }
+      if (req.method === 'POST' && p === '/__admin/autostart') {
+        return sendJson(res, 200, setAutostart(Boolean(body.enabled)));
       }
     } catch (e) {
       return sendJson(res, 400, { error: String(e.message) });
@@ -1659,6 +1799,7 @@ function start() {
   loadConfig();
   const envLoaded = loadEnvFileIntoProcess();
   if (envLoaded) console.log(`[codex-switch] env file loaded: ${envLoaded} key(s) from ${ENV_FILE}`);
+  ensureDefaultAutostart();
   const off = detectOfficial();
   console.log(off.loggedIn
     ? `[codex-switch] official subscription: logged in (${off.identity || 'account'}), preserving ${off.configSections.length} config sections + ${off.officialModels.length} official models`
@@ -1666,7 +1807,11 @@ function start() {
   const { host, port } = getListenParts();
   const server = http.createServer(handle);
   server.on('error', (e) => {
-    console.error(`[codex-switch] listen error: ${e.message}`);
+    if (e.code === 'EADDRINUSE') {
+      console.error(`[codex-switch] 端口 ${port} 已被占用 — 可能已有实例在运行(管理页: http://${host}:${port}/),本实例退出。`);
+    } else {
+      console.error(`[codex-switch] listen error: ${e.message}`);
+    }
     process.exit(1);
   });
   server.listen(port, host, () => {
