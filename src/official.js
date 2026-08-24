@@ -123,7 +123,17 @@ export function officialCatalog() {
   const models = new Map();
   for (const b of bins) {
     for (const m of b.catalog.models) {
-      if (m && typeof m.slug === 'string' && !models.has(m.slug)) models.set(m.slug, m);
+      if (!m || typeof m.slug !== 'string') continue;
+      const have = models.get(m.slug);
+      if (!have) { models.set(m.slug, m); continue; }
+      // 字段级回填:同一 slug 以较新二进制的条目为底(值更新),但把它缺少的
+      // 字段从较旧二进制的同 slug 条目补齐。不同客户端变体(桌面端 / CLI)内嵌的
+      // catalog 字段集不一致——例如新版桌面变体值更新却缺 base_instructions /
+      // supports_parallel_tool_calls 等 codex CLI 必需字段;只补缺、不覆盖已有值,
+      // 保证条目结构完整,CLI 不会因缺字段拒绝启动。
+      for (const k of Object.keys(m)) {
+        if (!(k in have)) have[k] = m[k];
+      }
     }
   }
   return {
