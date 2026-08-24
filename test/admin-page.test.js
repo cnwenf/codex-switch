@@ -8,6 +8,7 @@ import {
   filterOptions,
   getProviderSaveProblem,
   isModelToggleAllowed,
+  markDiscoveredModels,
   mergeSelectedModels,
   nextOptionIndex,
   renderAdminPage,
@@ -69,6 +70,20 @@ test('small secondary text meets WCAG AA contrast on every page surface', () => 
       `${faint} must reach 4.5:1 on ${background}`,
     );
   }
+});
+
+test('disabled provider cards and reference options do not fade their text through ancestor opacity', () => {
+  const html = render();
+  const disabledCard = cssRule(html, '.pcard.off');
+  const referenceOption = cssRule(html, '.list-option[aria-disabled="true"]');
+
+  assert.doesNotMatch(disabledCard, /(?:^|;)\s*opacity\s*:/);
+  assert.match(disabledCard, /background:/);
+  assert.match(disabledCard, /border-color:/);
+  assert.doesNotMatch(referenceOption, /(?:^|;)\s*opacity\s*:/);
+  assert.match(referenceOption, /background:/);
+  assert.match(referenceOption, /border-color:/);
+  assert.match(html, /仅供参考 · 不可路由/);
 });
 
 test('API key stays password-only and is never embedded as a JavaScript value', () => {
@@ -165,17 +180,16 @@ test('save rules block unroutable or invalid setups but allow explained unverifi
   assert.equal(getProviderSaveProblem({ ...ready, validationStatus: 'unsupported' }), '');
 });
 
-test('manual discovery references require a user-configured endpoint or deployment ID', async () => {
-  const page = await import('../src/admin-page.js');
-  assert.equal(typeof page.markDiscoveredModels, 'function');
-  const [reference] = page.markDiscoveredModels(
+test('manual-only preset references require a user-configured endpoint or deployment ID', () => {
+  const [reference] = markDiscoveredModels(
     [{ id: 'doubao-reference', responses: true, source: 'static' }],
     'manual',
+    true,
   );
   assert.equal(reference.referenceOnly, true);
   assert.equal(isModelToggleAllowed(reference, false), false);
-  const [apiModel] = page.markDiscoveredModels([{ id: 'api-model', responses: true }], 'api');
-  const [staticModel] = page.markDiscoveredModels([{ id: 'static-model', responses: true }], 'static');
+  const [apiModel] = markDiscoveredModels([{ id: 'api-model', responses: true }], 'api', false);
+  const [staticModel] = markDiscoveredModels([{ id: 'static-model', responses: true }], 'static', false);
   assert.equal(apiModel.referenceOnly, false);
   assert.equal(staticModel.referenceOnly, false);
   assert.equal(isModelToggleAllowed(apiModel, false), true);
@@ -191,6 +205,7 @@ test('manual discovery references require a user-configured endpoint or deployme
     validationStatus: 'unverified',
     allowUnverified: true,
     modelSource: 'manual',
+    requiresManualModel: true,
     manualModelIds: [],
   };
   assert.match(getProviderSaveProblem(state), /Endpoint|Deployment/);
@@ -198,16 +213,39 @@ test('manual discovery references require a user-configured endpoint or deployme
 
   const html = render();
   assert.match(html, /modelSource:DISCOVERY_MODEL_SOURCE/);
+  assert.match(html, /requiresManualModel:SELECTED_PRESET\.requiresManualModel===true/);
   assert.match(html, /manualModelIds:Array\.from\(MANUAL_MODEL_IDS\)/);
 });
 
-test('manual-only providers keep the manual save gate when discovery has no usable source', async () => {
-  const page = await import('../src/admin-page.js');
-  assert.equal(typeof page.resolveDiscoveryModelSource, 'function');
-  assert.equal(page.resolveDiscoveryModelSource('manual', false), 'manual');
-  assert.equal(page.resolveDiscoveryModelSource('api', true), 'api');
-  assert.equal(page.resolveDiscoveryModelSource(undefined, true), 'manual');
-  assert.equal(page.resolveDiscoveryModelSource(undefined, false), 'unknown');
+test('transient manual discovery fallback does not turn an ordinary provider into a deployment-only preset', () => {
+  const preservedModels = mergeSelectedModels(['gpt-api-model'], []);
+  assert.deepEqual(preservedModels, [{
+    id: 'gpt-api-model',
+    name: 'gpt-api-model',
+    source: 'manual',
+  }]);
+  const ordinaryProvider = {
+    routable: true,
+    compatibility: 'supported',
+    auth: 'bearer',
+    hasKey: true,
+    hasSavedKey: false,
+    modelIds: preservedModels.map((model) => model.id),
+    validationStatus: 'unreachable',
+    allowUnverified: false,
+    modelSource: 'manual',
+    requiresManualModel: false,
+    manualModelIds: [],
+  };
+
+  assert.equal(getProviderSaveProblem(ordinaryProvider), '');
+  const [preservedApiModel] = markDiscoveredModels(
+    [{ id: 'gpt-api-model', responses: true, source: 'api' }],
+    'manual',
+    false,
+  );
+  assert.equal(preservedApiModel.referenceOnly, false);
+  assert.equal(isModelToggleAllowed(preservedApiModel, false), true);
 });
 
 test('browser URL derivation mirrors fixed, parameterized, NIM, and Custom presets', () => {

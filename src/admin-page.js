@@ -23,7 +23,7 @@ export function getProviderSaveProblem(state) {
   if (!state.routable || state.compatibility === 'unsupported') {
     return '该厂商没有可直连的 Responses API，不能保存为路由。';
   }
-  if (state.modelSource === 'manual') {
+  if (state.requiresManualModel) {
     const selected = new Set(Array.isArray(state.modelIds) ? state.modelIds : []);
     const manualIds = Array.isArray(state.manualModelIds) ? state.manualModelIds : [];
     if (!manualIds.some((id) => selected.has(id))) {
@@ -126,15 +126,15 @@ export function clearSensitiveModalFields(apiKeyInput, importInput) {
   if (importInput) importInput.value = '';
 }
 
-export function markDiscoveredModels(models, modelSource) {
-  const referenceOnly = modelSource === 'manual';
+export function markDiscoveredModels(models, modelSource, requiresManualModel) {
+  const referenceOnly = modelSource === 'manual' && Boolean(requiresManualModel);
   return (Array.isArray(models) ? models : []).map((model) => ({ ...model, referenceOnly }));
 }
 
-export function resolveDiscoveryModelSource(modelSource, manualOnlyProvider) {
+export function resolveDiscoveryModelSource(modelSource) {
   return ['api', 'static', 'manual'].includes(modelSource)
     ? modelSource
-    : (manualOnlyProvider ? 'manual' : 'unknown');
+    : 'unknown';
 }
 
 export function isModelToggleAllowed(model, isSelected) {
@@ -217,9 +217,10 @@ main{max-width:1080px;margin:1.5rem auto 2.5rem;padding:0 1.25rem}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:.9rem}
 .pcard{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--border);border-radius:14px;
-  padding:1rem 1.15rem;display:flex;flex-direction:column;gap:.55rem;transition:border-color .15s,opacity .15s}
+  padding:1rem 1.15rem;display:flex;flex-direction:column;gap:.55rem;transition:border-color .15s,background .15s}
 .pcard:hover{border-color:var(--border2)}
-.pcard.off{opacity:.6}
+.pcard.off{background:var(--bg2);border-color:var(--border2)}
+.pcard.off .dot{opacity:.65}
 .pcard-top{display:flex;justify-content:space-between;align-items:center;gap:.6rem}
 .pcard-id{display:flex;align-items:center;gap:.5rem;min-width:0}
 .pcard-id b{font-size:.98rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -312,7 +313,7 @@ label.ck input{width:auto}
   border-radius:7px;color:var(--text);background:transparent;text-align:left;cursor:pointer;font:inherit}
 .list-option:hover,.list-option.active{background:var(--panel2);border-color:var(--border2)}
 .list-option[aria-selected="true"]{border-color:rgba(109,141,255,.55)}
-.list-option[aria-disabled="true"]{opacity:.58;cursor:not-allowed}
+.list-option[aria-disabled="true"]{color:var(--muted);background:var(--bg2);border-color:var(--border2);cursor:not-allowed}
 .list-option-main{min-width:0;flex:1}
 .list-option-name{display:block;font-weight:600;overflow-wrap:anywhere}
 .list-option-id{display:block;color:var(--faint);font:11px/1.5 var(--mono);overflow-wrap:anywhere}
@@ -555,7 +556,6 @@ var DISCOVERY_CONTROLLER=null;
 var DISCOVERY_SEQUENCE=0;
 var PREVIOUS_FOCUS=null;
 var STATIC_UNVERIFIED={'volcengine-ark':1,'azure-openai':1,'cloudflare-workers-ai':1};
-var MANUAL_DISCOVERY={'volcengine-ark':1,'azure-openai':1};
 function $(id){return document.getElementById(id);}
 var PRETTY_ACR={gpt:1,api:1,llm:1,url:1,ws:1};
 function prettyName(s){return String(s==null?'':s).split('-').map(function(w){if(!w)return w;if(PRETTY_ACR[w.toLowerCase()])return w.toUpperCase();return w.charAt(0).toUpperCase()+w.slice(1);}).join(' ');}
@@ -984,7 +984,7 @@ function abortDiscovery(){
 function invalidateDiscovery(keepSelected,message){
   abortDiscovery();
   DISCOVERED_MODELS=[];
-  DISCOVERY_MODEL_SOURCE=resolveDiscoveryModelSource(undefined,SELECTED_PRESET&&MANUAL_DISCOVERY[SELECTED_PRESET.id]);
+  DISCOVERY_MODEL_SOURCE=resolveDiscoveryModelSource();
   if(keepSelected)SELECTED_MODELS=mergeSelectedModels(SELECTED_MODELS.map(function(model){return model.id;}),[]);
   else SELECTED_MODELS=[];
   MODEL_ACTIVE=-1;
@@ -1047,8 +1047,12 @@ function requestDiscovery(){
   }).then(function(result){
     if(sequence!==DISCOVERY_SEQUENCE||controller.signal.aborted)return;
     var validation=result.validation||{status:'unverified',message:'未返回验证状态。'};
-    DISCOVERY_MODEL_SOURCE=resolveDiscoveryModelSource(result.modelSource,SELECTED_PRESET&&MANUAL_DISCOVERY[SELECTED_PRESET.id]);
-    DISCOVERED_MODELS=markDiscoveredModels(result.models,DISCOVERY_MODEL_SOURCE);
+    DISCOVERY_MODEL_SOURCE=resolveDiscoveryModelSource(result.modelSource);
+    DISCOVERED_MODELS=markDiscoveredModels(
+      result.models,
+      DISCOVERY_MODEL_SOURCE,
+      SELECTED_PRESET&&SELECTED_PRESET.requiresManualModel===true
+    );
     DISCOVERED_MODELS.forEach(function(model){if(model.referenceOnly)MANUAL_MODEL_IDS.delete(model.id);});
     SELECTED_MODELS=mergeSelectedModels(SELECTED_MODELS.map(function(model){return model.id;}),DISCOVERED_MODELS);
     MODEL_ACTIVE=-1;
@@ -1064,7 +1068,7 @@ function requestDiscovery(){
     if(error&&error.name==='AbortError')return;
     if(sequence!==DISCOVERY_SEQUENCE)return;
     DISCOVERED_MODELS=[];
-    DISCOVERY_MODEL_SOURCE=resolveDiscoveryModelSource(undefined,SELECTED_PRESET&&MANUAL_DISCOVERY[SELECTED_PRESET.id]);
+    DISCOVERY_MODEL_SOURCE=resolveDiscoveryModelSource();
     SELECTED_MODELS=mergeSelectedModels(SELECTED_MODELS.map(function(model){return model.id;}),[]);
     setDiscoveryStatus('unreachable','检测请求失败；可重试，已选手动模型仍保留。');
     renderSelectedModels();
@@ -1376,6 +1380,7 @@ function saveProvider(){
     hasSavedKey:HAS_SAVED_KEY&&!deleteKey,
     modelIds:modelIds,
     modelSource:DISCOVERY_MODEL_SOURCE,
+    requiresManualModel:SELECTED_PRESET.requiresManualModel===true,
     manualModelIds:Array.from(MANUAL_MODEL_IDS),
     validationStatus:VALIDATION_STATUS,
     allowUnverified:allowUnverifiedSave()

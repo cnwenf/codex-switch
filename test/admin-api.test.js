@@ -154,6 +154,9 @@ test('admin returns safe presets and discovers a Custom model', async (t) => {
   const presets = await presetResponse.json();
   assert.equal(presets.presets.at(-1).id, 'custom');
   assert.equal(JSON.stringify(presets).includes('buildBaseUrl'), false);
+  assert.equal(presets.presets.find((preset) => preset.id === 'openai').requiresManualModel, false);
+  assert.equal(presets.presets.find((preset) => preset.id === 'volcengine-ark').requiresManualModel, true);
+  assert.equal(presets.presets.find((preset) => preset.id === 'azure-openai').requiresManualModel, true);
 
   const key = 'fixture-explicit-discovery-secret';
   const discoveryResponse = await postJson(app.origin, '/__admin/provider-discover', {

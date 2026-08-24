@@ -47,6 +47,17 @@ test('public preset projection contains no executable functions', () => {
   assert.equal(Object.values(getProviderPreset('openrouter').public).some((value) => typeof value === 'function'), false);
 });
 
+test('only deployment-style presets publish stable manual model requirements', () => {
+  const presets = listProviderPresets();
+  assert.deepEqual(
+    presets.filter((item) => item.requiresManualModel).map((item) => item.id),
+    ['volcengine-ark', 'azure-openai'],
+  );
+  assert.equal(presets.find((item) => item.id === 'openai').requiresManualModel, false);
+  assert.equal(presets.find((item) => item.id === 'volcengine-ark').requiresManualModel, true);
+  assert.equal(presets.find((item) => item.id === 'azure-openai').requiresManualModel, true);
+});
+
 test('only supported, beta, and limited presets are routable', () => {
   assert.equal(isRoutableCompatibility('supported'), true);
   assert.equal(isRoutableCompatibility('beta'), true);

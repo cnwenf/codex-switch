@@ -48,6 +48,7 @@ function preset(definition) {
   const entry = {
     auth: 'bearer',
     options: [],
+    requiresManualModel: false,
     ...definition,
     routable: isRoutableCompatibility(definition.compatibility),
   };
@@ -62,11 +63,11 @@ export const PROVIDER_PRESETS = freeze([
   preset({ id: 'groq', name: 'Groq', group: GROUPS.direct, compatibility: 'beta', tokenEnv: 'GROQ_API_KEY', baseUrl: 'https://api.groq.com/openai/v1' }),
   preset({ id: 'fireworks', name: 'Fireworks AI', group: GROUPS.direct, compatibility: 'supported', tokenEnv: 'FIREWORKS_API_KEY', baseUrl: 'https://api.fireworks.ai/inference/v1' }),
   preset({ id: 'baidu-qianfan', name: '百度千帆', group: GROUPS.direct, compatibility: 'supported', tokenEnv: 'QIANFAN_API_KEY', baseUrl: 'https://qianfan.baidubce.com/v2' }),
-  preset({ id: 'volcengine-ark', name: '火山方舟', group: GROUPS.direct, compatibility: 'supported', tokenEnv: 'ARK_API_KEY', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' }),
+  preset({ id: 'volcengine-ark', name: '火山方舟', group: GROUPS.direct, compatibility: 'supported', tokenEnv: 'ARK_API_KEY', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', requiresManualModel: true }),
   preset({ id: 'tencent-tokenhub', name: '腾讯 TokenHub', group: GROUPS.direct, compatibility: 'limited', tokenEnv: 'TENCENT_TOKENHUB_API_KEY', options: [{ name: 'site', type: 'select', default: 'cn', choices: ['cn', 'intl'] }], buildBaseUrl: ({ site }) => (site === 'intl' ? 'https://tokenhub-intl.tencentcloudmaas.com/v1' : 'https://tokenhub.tencentmaas.com/v1') }),
   preset({ id: 'bailian', name: '阿里云百炼', group: GROUPS.direct, compatibility: 'limited', tokenEnv: 'DASHSCOPE_API_KEY', options: [{ name: 'region', type: 'select', default: 'cn-beijing', choices: ['cn-beijing', 'ap-southeast-1', 'us-east-1'] }, { name: 'workspace_id', type: 'text', default: '' }], buildBaseUrl: bailianBaseUrl }),
   preset({ id: 'aws-bedrock', name: 'AWS Bedrock', group: GROUPS.cloud, compatibility: 'supported', tokenEnv: 'AWS_BEDROCK_API_KEY', options: [{ name: 'region', type: 'text', default: 'us-east-1' }], buildBaseUrl: ({ region }) => `https://bedrock-mantle.${region}.api.aws/v1` }),
-  preset({ id: 'azure-openai', name: 'Azure OpenAI / Microsoft Foundry', group: GROUPS.cloud, compatibility: 'supported', tokenEnv: 'AZURE_OPENAI_API_KEY', options: [{ name: 'resource_endpoint', type: 'url', default: '' }], buildBaseUrl: ({ resource_endpoint: endpoint }) => `${endpoint}/openai/v1` }),
+  preset({ id: 'azure-openai', name: 'Azure OpenAI / Microsoft Foundry', group: GROUPS.cloud, compatibility: 'supported', tokenEnv: 'AZURE_OPENAI_API_KEY', options: [{ name: 'resource_endpoint', type: 'url', default: '' }], buildBaseUrl: ({ resource_endpoint: endpoint }) => `${endpoint}/openai/v1`, requiresManualModel: true }),
   preset({ id: 'cloudflare-workers-ai', name: 'Cloudflare Workers AI', group: GROUPS.cloud, compatibility: 'limited', tokenEnv: 'CLOUDFLARE_API_TOKEN', options: [{ name: 'account_id', type: 'text', default: '' }], buildBaseUrl: ({ account_id: accountId }) => `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1` }),
   preset({ id: 'nvidia-nim', name: 'NVIDIA NIM（自托管）', group: GROUPS.cloud, compatibility: 'limited', tokenEnv: 'NVIDIA_NIM_API_KEY', options: [{ name: 'base_url', type: 'url', default: 'http://127.0.0.1:8000/v1' }] }),
   ...UNSUPPORTED_PROVIDERS.map(([id, name]) => preset({ id, name, group: GROUPS.unsupported, compatibility: 'unsupported', tokenEnv: '' })),
