@@ -43,6 +43,8 @@ chmod +x "$MACOS_DIR/node"
 cp package.json config.toml "$RES/app/"
 mkdir -p "$RES/app/src"
 cp src/*.js "$RES/app/src/"
+# App 图标(assets/logo.svg → assets/app.icns,iconutil 编译产物)
+[ -f assets/app.icns ] && cp assets/app.icns "$RES/app.icns"
 ( cd "$RES/app" && npm install --omit=dev --no-fund --no-audit --loglevel=error )
 
 # ---------- 4. Info.plist ----------
@@ -55,6 +57,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>Codex Switch</string>
   <key>CFBundleIdentifier</key><string>com.cnwenf.codex-switch</string>
   <key>CFBundleExecutable</key><string>codex-switch-launcher</string>
+  <key>CFBundleIconFile</key><string>app</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>

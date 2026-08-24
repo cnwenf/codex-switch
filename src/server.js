@@ -983,7 +983,7 @@ function enabledUnion() {
 // ---------- admin ----------
 function generateCodexConfig() {
   const c = getConfig();
-  const configToml = `# --- codex-switch: add to ~/.codex/config.toml (or click "应用并备份" below) ---
+  const configToml = `# --- codex-switch: managed by codex-switch (127.0.0.1 admin API) ---
 ${CATALOG_LINE}
 
 ${codexProviderBlock().trimEnd()}
@@ -1176,12 +1176,11 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
 <body>
 <header class="topbar">
   <div class="brand">
-    <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h5l3-6h10M8 12l3 6h10"/><circle cx="3.2" cy="12" r="1.7"/><circle cx="20.8" cy="6" r="1.7"/><circle cx="20.8" cy="18" r="1.7"/></svg>
+    <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#3ddc97" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="12" r="1.9" fill="#3ddc97" stroke="none"/><path d="M6.5 12h4"/><path d="M10.5 12c3.2 0 3.6-4.5 6.8-4.5"/><path d="M10.5 12c3.2 0 3.6 4.5 6.8 4.5"/><path d="M17.3 4.6 21 7.5l-3.7 2.9"/><path d="M17.3 13.6 21 16.5l-3.7 2.9"/></svg>
     codex-switch<span class="sub">多供应商模型路由</span>
   </div>
   <nav class="tabs">
     <button id="tabbtn-providers" class="tabbtn active" onclick="switchTab('providers')">供应商</button>
-    <button id="tabbtn-codex" class="tabbtn" onclick="switchTab('codex')">Codex 接入</button>
     <button id="tabbtn-history" class="tabbtn" onclick="switchTab('history')">配置历史</button>
   </nav>
   <div class="chips">
@@ -1207,43 +1206,6 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
     <p class="note">Codex 看到的模型 = 所有「启用」供应商的模型并集。停用供应商不会删除它,只是从路由表和并集中移除。API Key 在供应商「编辑」里直接填写(存本机 <span class="mono">~/.codex-switch/env</span>,chmod 600,保存即生效);供应商配置文件里只存环境变量名,不出现明文。</p>
   </section>
 
-  <section id="tab-codex" class="pane" style="display:none">
-    <section class="card">
-      <div class="card-head"><h2><span class="bar"></span>Codex 接入</h2></div>
-      <p class="note">一键写入 <code>~/.codex/</code>:改动前自动备份 → 手术式合并(只增改 codex-switch 自己的两段配置,官方内容一字节不动)→ catalog.json 合并时保留全部官方条目。还原 = 取最新备份覆盖回去。应用后重启 Codex 生效。</p>
-      <div id="codexStatus" class="status muted">尚未应用。</div>
-      <div id="backupList"></div>
-      <div class="pane-actions" style="margin-top:.8rem">
-        <button class="btn primary" onclick="applyCodex()">应用并备份</button>
-        <button class="btn danger" onclick="restoreCodex()">一键还原</button>
-      </div>
-      <div style="margin-top:.8rem;padding-top:.7rem;border-top:1px dashed var(--border)">
-        <label style="display:flex;gap:.5rem;align-items:center;cursor:pointer;font-size:.85rem">
-          <input type="checkbox" id="autostartChk" onchange="toggleAutostart()">
-          <span>开机 / 登录时自动启动服务 <span class="muted">(macOS LaunchAgent,默认开启)</span></span>
-        </label>
-        <div id="autostartInfo" class="status muted"></div>
-      </div>
-    </section>
-    <section class="card">
-      <div class="card-head"><h2><span class="bar"></span>官方订阅</h2><span id="subStatus" class="badge">检测中…</span></div>
-      <table id="subTable" class="kv" style="display:none"><tbody>
-        <tr><td>登录状态</td><td id="subLogin"></td></tr>
-        <tr><td>账号(脱敏)</td><td class="mono" id="subId"></td></tr>
-        <tr><td>auth.json</td><td class="mono" id="subAuth"></td></tr>
-        <tr><td>官方模型</td><td id="subModels"></td></tr>
-<tr><td>官方目录同步</td><td id="subEmbedded"></td></tr>
-        <tr><td>配置段</td><td id="subSections"></td></tr>
-      </tbody></table>
-      <p class="note">官方订阅的模型列表与配置只读展示;应用 / 还原时绝对不覆盖、不删除。</p>
-    </section>
-    <section class="card">
-      <div class="card-head"><h2><span class="bar"></span>Codex 侧配置预览</h2><span class="badge">由「应用并备份」写入</span></div>
-      <details><summary class="mono">~/.codex/config.toml(将合并的段)</summary><pre id="codexCfg"></pre></details>
-      <details><summary class="mono">~/.codex/catalog.json(合并后的目录)</summary><pre id="codexCat"></pre></details>
-    </section>
-  </section>
-
   <section id="tab-history" class="pane" style="display:none">
     <div class="pane-head">
       <div>
@@ -1254,6 +1216,19 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
     </div>
     <p class="note">每次在页面上改动供应商配置之前,都会自动把 <span class="mono">config.toml</span> 备份到这里。点「还原」会先把当前配置备份一份,再用所选版本覆盖,然后热重载路由表。</p>
     <div id="historyList"></div>
+    <section class="card" style="margin-top:1rem">
+      <div class="card-head"><h2><span class="bar"></span>Codex 注入配置</h2></div>
+      <p class="note">「一键还原」= 取最新备份覆盖回 <code>~/.codex/</code>,移除 codex-switch 注入的 model_provider / model_catalog_json 等配置段与 catalog 合并条目;官方自有内容一字节不动。还原后重启 Codex 生效。</p>
+      <div class="pane-actions"><button class="btn danger" onclick="restoreCodex()">一键还原</button></div>
+      <div id="codexStatus" class="status muted"></div>
+      <div style="margin-top:.8rem;padding-top:.7rem;border-top:1px dashed var(--border)">
+        <label style="display:flex;gap:.5rem;align-items:center;cursor:pointer;font-size:.85rem">
+          <input type="checkbox" id="autostartChk" onchange="toggleAutostart()">
+          <span>开机 / 登录时自动启动服务 <span class="muted">(macOS LaunchAgent,默认开启)</span></span>
+        </label>
+        <div id="autostartInfo" class="status muted"></div>
+      </div>
+    </section>
   </section>
 
 </main>
@@ -1316,7 +1291,7 @@ function api(url,body){
   });
 }
 function switchTab(name){
-  var tabs=['providers','codex','history'];
+  var tabs=['providers','history'];
   for(var i=0;i<tabs.length;i++){
     var pane=$('tab-'+tabs[i]);var btn=$('tabbtn-'+tabs[i]);
     if(tabs[i]===name){pane.style.display='flex';btn.className='tabbtn active';}
@@ -1324,7 +1299,6 @@ function switchTab(name){
   }
   if(name==='providers')loadProviders();
   if(name==='history')loadHistory();
-  if(name==='codex'){loadCodexStatus();loadCodexPreview();}
 }
 
 /* ---------- 供应商 ---------- */
@@ -1557,54 +1531,12 @@ $('historyList').addEventListener('click',function(e){
   if(t.getAttribute('data-act')==='restore')restoreHist(t.getAttribute('data-file'));
 });
 
-/* ---------- Codex 接入 ---------- */
-function loadCodexPreview(){
-  api('/__admin/codex-config').then(function(d){
-    $('codexCfg').textContent=d.config_toml;
-    $('codexCat').textContent=d.catalog_json;
-  }).catch(function(){});
-}
-function setCodexStatus(cls,msg){var el=$('codexStatus');el.className='status '+cls;el.textContent=msg;}
-function loadCodexStatus(){
-  var sub=$('subStatus');
-  api('/__admin/codex-status').then(function(j){
-    sub.className=j.loggedIn?'badge ok':'badge warn';
-    sub.textContent=j.loggedIn?'官方账号已登录':'未检测到官方登录';
-    $('subTable').style.display='table';
-    $('subLogin').textContent=j.loggedIn?'✓ 已登录(auth.json 含 access_token)':'✗ 未登录(auth.json 无 access_token)';
-    $('subId').textContent=j.identity||'—';
-    $('subAuth').textContent=j.authPath||'—';
-    var om=j.officialModels||[];
-    $('subModels').textContent=om.length?(om.length+' 个: '+om.join(', ')):'0 个(应用后将显示被保留的官方 catalog 条目)';
-    var em=j.embeddedCatalog;
-    $('subEmbedded').textContent=em
-      ?('✓ '+em.modelCount+' 个模型自动同步自 codex 二进制 — '+em.sources.map(function(s){return s.bin+' ['+s.models+' 个]';}).join(' ; ')+'。官方新增模型:升级 codex 后点「应用并备份」即生效。')
-      :'✗ 未找到 codex 二进制内嵌目录(回退:仅用配置文件中的模型列表)';
-    var secs=j.configSections||[];
-    $('subSections').textContent=secs.length?(secs.length+' 段: '+secs.slice(0,15).join(', ')+(secs.length>15?' …':'')):'0 段';
-    var bl=$('backupList');
-    bl.textContent='';
-    var bs=j.backups||[];
-    if(!bs.length){bl.textContent='暂无备份(点「应用并备份」会在改动前自动生成)。';return;}
-    bl.textContent='备份('+bs.length+' 份,还原取最新一份):';
-    var ul=document.createElement('ul');
-    for(var i=0;i<bs.length&&i<12;i++){var li=document.createElement('li');li.textContent=bs[i].original+' ← '+bs[i].file;ul.appendChild(li);}
-    if(bs.length>12){var li2=document.createElement('li');li2.textContent='… 共 '+bs.length+' 份';ul.appendChild(li2);}
-    bl.appendChild(ul);
-  }).catch(function(){sub.className='badge warn';sub.textContent='查询失败';});
-}
-function applyCodex(){
-  setCodexStatus('muted','应用中:备份 + 校验 + 手术式合并…');
-  api('/__admin/codex-apply',{}).then(function(j){
-    setCodexStatus('ok','✓ 已应用并备份 '+(j.backups||[]).length+' 份 · 官方配置段 '+(j.preserved&&j.preserved.configSectionsAfter!=null?j.preserved.configSectionsAfter:'?')+' 段、官方模型 '+(j.preserved&&j.preserved.officialModelsAfter!=null?j.preserved.officialModelsAfter:'?')+' 个全部保留 — 重启 Codex 生效');
-    loadCodexStatus();
-  }).catch(function(e){setCodexStatus('err','✗ 应用失败: '+e.message);});
-}
+/* ---------- Codex 注入配置:一键还原(已并入「配置历史」页签) ---------- */
+function setCodexStatus(cls,msg){var el=$('codexStatus');if(el){el.className='status '+cls;el.textContent=msg;}}
 function restoreCodex(){
   setCodexStatus('muted','正在还原最新备份…');
   api('/__admin/codex-restore',{}).then(function(j){
-    setCodexStatus('ok','✓ 已还原: '+((j.restored&&j.restored.length)?j.restored.map(function(x){return x.file+' ← '+x.from;}).join(', '):'(无备份可还原)'));
-    loadCodexStatus();
+    setCodexStatus('ok','✓ 已还原: '+((j.restored&&j.restored.length)?j.restored.map(function(x){return x.file+' ← '+x.from;}).join(', '):'(无备份可还原)')+' — 重启 Codex 生效');
   }).catch(function(e){setCodexStatus('err','✗ 还原失败: '+e.message);});
 }
 
@@ -1629,8 +1561,6 @@ function toggleAutostart(){
 }
 
 loadProviders();
-loadCodexStatus();
-loadCodexPreview();
 loadAutostart();
 </script>
 </body></html>`;

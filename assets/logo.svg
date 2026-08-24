@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#212d42"/>
+      <stop offset="1" stop-color="#0d1320"/>
+    </linearGradient>
+    <linearGradient id="line" gradientUnits="userSpaceOnUse" x1="180" y1="0" x2="850" y2="0">
+      <stop offset="0" stop-color="#3ddc97"/>
+      <stop offset="1" stop-color="#7ce7c4"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="14" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- 圆角方形底 -->
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bg)"/>
+  <rect x="34" y="34" width="956" height="956" rx="222" fill="none" stroke="#3ddc97" stroke-opacity="0.14" stroke-width="4"/>
+
+  <!-- 路由开关图形:一个入口 → 分支 → 两个出口 -->
+  <g filter="url(#glow)">
+    <g fill="none" stroke="url(#line)" stroke-width="70" stroke-linecap="round">
+      <path d="M 236 512 H 468"/>
+      <path d="M 468 512 C 600 512 610 330 726 330"/>
+      <path d="M 468 512 C 600 512 610 694 726 694"/>
+    </g>
+    <polygon points="726,266 726,394 846,330" fill="#7ce7c4"/>
+    <polygon points="726,630 726,758 846,694" fill="#7ce7c4"/>
+    <circle cx="236" cy="512" r="62" fill="#3ddc97"/>
+    <circle cx="468" cy="512" r="40" fill="#0d1320" stroke="#3ddc97" stroke-width="16"/>
+  </g>
+</svg>
