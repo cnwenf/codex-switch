@@ -6,6 +6,7 @@ import {
   normalizeOpenAIModel,
   validateDiscoveryUrl,
 } from '../src/provider-discovery.js';
+import { normalizeProvider } from '../src/provider-config.js';
 
 const response = (status, body, headers = {}) => new Response(JSON.stringify(body), {
   status,
@@ -320,6 +321,37 @@ test('Bailian workspace discovery uses the native workspace host and stops after
   assert.deepEqual(pages, ['1', '2', '3', '4', '5']);
   assert.equal(result.models.length, 5);
   assert.equal(result.warnings.some((warning) => /page|limit/i.test(warning)), true);
+});
+
+test('legacy Bailian workspace normalization reaches the native discovery adapter', async () => {
+  const provider = normalizeProvider({
+    id: 'legacy-workspace',
+    name: 'Legacy Workspace',
+    auth: 'bearer',
+    token_env: 'LEGACY_WORKSPACE_API_KEY',
+    base_url: 'https://workspace123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    models: ['qwen-workspace'],
+  });
+  const calls = [];
+  const result = await discoverProvider({
+    providerType: provider.provider_type,
+    providerOptions: provider.provider_options,
+    baseUrl: provider.base_url,
+    apiKey: 'fixture-key',
+  }, {
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return response(200, {
+        data: [{ id: 'wrong-generic-model' }],
+        output: { total: 1, models: [{ model: 'qwen-workspace' }] },
+      });
+    },
+  });
+  assert.equal(
+    new URL(calls[0]).origin + new URL(calls[0]).pathname,
+    'https://workspace123.ap-southeast-1.maas.aliyuncs.com/api/v1/models',
+  );
+  assert.deepEqual(result.models.map((model) => model.id), ['qwen-workspace']);
 });
 
 test('model collection is capped at 2,000 entries', async () => {

@@ -114,7 +114,7 @@ export function cacheDiscoveredModels(providerId, models) {
     at: Date.now(),
     models: new Map(models.map((model) => [model.id, {
       contextWindow: model.contextWindow,
-      vision: model.input?.image === true,
+      vision: model.input?.image,
       reasoning: model.reasoning,
       source: model.source,
     }])),
@@ -130,6 +130,7 @@ export function resolveCaps(config, provider, modelId) {
   const cached = capsCache.get(provider.id);
   const fetched = cached?.models?.get(modelId);
   const stat = STATIC_CAPS[modelId] || DEFAULT_CAPS;
+  const discoveredVision = typeof fetched?.vision === 'boolean' ? fetched.vision : undefined;
   let source;
   if (over) source = 'config override';
   else if (fetched) source = `provider discovery (${fetched.source || 'unknown'})`;
@@ -137,7 +138,7 @@ export function resolveCaps(config, provider, modelId) {
   else source = 'default (unknown model)';
   return {
     contextWindow: over?.context_window ?? fetched?.contextWindow ?? stat.contextWindow,
-    vision: !!(over?.vision ?? fetched?.vision ?? stat.vision),
+    vision: !!(over?.vision ?? discoveredVision ?? stat.vision),
     levels: over?.reasoning_efforts ?? (fetched?.reasoning === false ? [] : stat.levels),
     defaultLevel: over?.default_reasoning_effort
       ?? (fetched?.reasoning === false ? null : stat.defaultLevel)

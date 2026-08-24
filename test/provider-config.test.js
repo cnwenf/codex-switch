@@ -80,6 +80,26 @@ test('legacy parameterized preset URLs keep their inferred connection options', 
   assert.equal(bedrock.base_url, 'https://bedrock-mantle.eu-west-1.api.aws/v1');
 });
 
+test('legacy Bailian workspace URLs normalize to the exact workspace and region', () => {
+  const provider = normalizeProvider({
+    id: 'legacy-bailian-workspace',
+    name: 'Legacy Bailian Workspace',
+    auth: 'bearer',
+    token_env: 'LEGACY_BAILIAN_WORKSPACE_API_KEY',
+    base_url: 'https://workspace123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    models: ['qwen-plus'],
+  });
+  assert.equal(provider.provider_type, 'bailian');
+  assert.deepEqual(provider.provider_options, {
+    region: 'ap-southeast-1',
+    workspace_id: 'workspace123',
+  });
+  assert.equal(
+    provider.base_url,
+    'https://workspace123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+  );
+});
+
 test('provider options serialize only TOML inline-table scalar values', () => {
   const region = buildProvidersRegion([{
     id: 'custom-scalars',
@@ -176,4 +196,34 @@ test('normalized discovery cache supplies capabilities below config overrides', 
     defaultLevel: 'high',
     source: 'config override',
   });
+});
+
+test('unknown discovery vision falls back to static metadata while explicit false overrides it', (t) => {
+  t.after(() => capsCache.clear());
+  const provider = { id: 'provider-vision' };
+  cacheDiscoveredModels(provider.id, [{
+    id: 'qwen3.8-max',
+    contextWindow: null,
+    input: { image: 'unknown' },
+    reasoning: 'unknown',
+    source: 'api',
+  }, {
+    id: 'unknown-static-model',
+    contextWindow: null,
+    input: { image: 'unknown' },
+    reasoning: 'unknown',
+    source: 'api',
+  }]);
+  assert.equal(capsCache.get(provider.id).models.get('qwen3.8-max').vision, 'unknown');
+  assert.equal(resolveCaps({}, provider, 'qwen3.8-max').vision, true);
+  assert.equal(resolveCaps({}, provider, 'unknown-static-model').vision, false);
+
+  cacheDiscoveredModels(provider.id, [{
+    id: 'qwen3.8-max',
+    contextWindow: null,
+    input: { image: false },
+    reasoning: 'unknown',
+    source: 'api',
+  }]);
+  assert.equal(resolveCaps({}, provider, 'qwen3.8-max').vision, false);
 });

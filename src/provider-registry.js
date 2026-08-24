@@ -97,6 +97,7 @@ export function inferProviderType(baseUrl) {
   try {
     const hostname = new URL(String(baseUrl)).hostname.toLowerCase();
     if (/^bedrock-mantle\.[a-z]{2}(?:-[a-z]+)+-\d+\.api\.aws$/.test(hostname)) return 'aws-bedrock';
+    if (/^[a-z0-9_-]+\.(?:cn-beijing|ap-southeast-1|us-east-1)\.maas\.aliyuncs\.com$/.test(hostname)) return 'bailian';
     for (const [host, type] of HOST_TYPES) {
       if (host.endsWith('.') ? hostname.startsWith(host) : hostname === host) return type;
     }
