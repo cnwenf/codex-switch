@@ -13,8 +13,20 @@ import https from 'node:https';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import TOML from '@iarna/toml';
-import { buildCatalogEntry, capsCache, CAPS_TTL_MS, fetchProviderCaps, resolveCaps } from './caps.js';
+import {
+  buildCatalogEntry,
+  cacheDiscoveredModels,
+  capsCache,
+  CAPS_TTL_MS,
+  resolveCaps,
+} from './caps.js';
 import { officialCatalog } from './official.js';
+import { discoverProvider } from './provider-discovery.js';
+import {
+  buildProvidersRegion,
+  normalizeProvider,
+  replaceProvidersRegion,
+} from './provider-config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 function resolveConfigPath() {
@@ -741,10 +753,9 @@ function applyToCodex() {
   return { ok: true, backups, preserved };
 }
 
-// ---------- capability refresh (Bailian live model list, cached 30 min) ----------
-// Fetches context_window / input modalities from the Bailian native /api/v1/models
-// for providers that are DashScope endpoints; other providers are skipped (static
-// table in caps.js covers them). Never touches request forwarding — catalog only.
+// ---------- capability refresh (provider discovery, cached 30 min) ----------
+// Discovery is advisory and only affects the generated catalog. A failed refresh
+// keeps any valid previous cache entry and never affects request forwarding.
 async function refreshAllCaps(force) {
   const results = [];
   for (const provider of getConfig().providers || []) {
@@ -756,16 +767,32 @@ async function refreshAllCaps(force) {
         continue;
       }
     }
+    if (provider.auth !== 'bearer') {
+      results.push({ provider: provider.id, status: 'skipped' });
+      continue;
+    }
     try {
-      const models = await fetchProviderCaps(provider);
-      if (models === null) {
-        results.push({ provider: provider.id, status: 'skipped' });
+      const normalized = normalizeProvider(provider);
+      const apiKey = (provider.token_env && process.env[provider.token_env]) || provider.token || '';
+      const discovered = await discoverProvider({
+        providerType: normalized.provider_type,
+        providerOptions: normalized.provider_options,
+        baseUrl: normalized.base_url,
+        apiKey,
+      });
+      const discoveryStatus = discovered.validation.status;
+      if (discovered.models.length || discoveryStatus === 'valid') {
+        cacheDiscoveredModels(provider.id, discovered.models);
+        results.push({
+          provider: provider.id,
+          status: discoveryStatus === 'valid' ? 'ok' : discoveryStatus,
+          models: discovered.models.length,
+        });
       } else {
-        capsCache.set(provider.id, { at: Date.now(), models });
-        results.push({ provider: provider.id, status: 'ok', models: models.size });
+        results.push({ provider: provider.id, status: discoveryStatus });
       }
     } catch (e) {
-      results.push({ provider: provider.id, status: 'error', detail: String(e.message) });
+      results.push({ provider: provider.id, status: 'error' });
     }
   }
   console.log(`[codex-switch] caps refresh: ${results.map((r) => `${r.provider}=${r.status}`).join(', ')}`);
@@ -879,61 +906,6 @@ async function handleProxy(req, bodyBuf, res) {
 // config.toml 快照进 ~/.codex-switch/history/,供「配置历史」逐个还原。
 const HISTORY_DIR = path.join(os.homedir(), '.codex-switch', 'history');
 
-function tomlStr(s) {
-  return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
-}
-
-// 把 providers 数组序列化为 [[providers]] 区块文本(每块带一行可读注释)
-function buildProvidersRegion(providers) {
-  const blocks = providers.map((p) => {
-    const lines = [];
-    lines.push(`# ${p.name || p.id} (${p.auth})${p.enabled === false ? ' — 已停用' : ''}`);
-    lines.push('[[providers]]');
-    lines.push(`id = ${tomlStr(p.id)}`);
-    lines.push(`name = ${tomlStr(p.name || p.id)}`);
-    lines.push(`base_url = ${tomlStr(p.base_url || '')}`);
-    lines.push(`auth = ${tomlStr(p.auth || 'bearer')}`);
-    if (p.token_env) lines.push(`token_env = ${tomlStr(p.token_env)}`);
-    if (p.token) lines.push(`token = ${tomlStr(p.token)}`);
-    lines.push(`models = [${(p.models || []).map(tomlStr).join(', ')}]`);
-    lines.push(`enabled = ${p.enabled === false ? 'false' : 'true'}`);
-    return lines.join('\n');
-  });
-  return blocks.join('\n\n');
-}
-
-// 在完整 config 文本里只替换 providers 区域,其余原样保留。
-// 区域 = 第一个 [[providers]] 头 ~ 最后一个 provider 块的最后一个键值行;
-// 其后的注释/其它段(如 model_overrides 文档)全部留在 after 里不动。
-function replaceProvidersRegion(text, providers) {
-  const lines = text.split('\n');
-  const heads = [];
-  lines.forEach((l, i) => { if (l.trim() === '[[providers]]') heads.push(i); });
-  const region = buildProvidersRegion(providers);
-  if (!heads.length) {
-    return text.replace(/\s+$/, '') + '\n\n' + region + '\n';
-  }
-  const start = heads[0];
-  const lastStart = heads[heads.length - 1];
-  let lastKV = lastStart;
-  for (let i = lastStart + 1; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (t.startsWith('[')) break; // 下一个段(非 providers)
-    if (t !== '' && !t.startsWith('#') && t.includes('=')) lastKV = i;
-  }
-  const before = lines.slice(0, start);
-  const after = lines.slice(lastKV + 1);
-  // 剥掉 before 尾部紧贴 providers 的注释/空行(避免留下失配旧注释)
-  while (before.length) {
-    const t = before[before.length - 1].trim();
-    if (t === '' || t.startsWith('#')) before.pop(); else break;
-  }
-  const parts = [...before, '', region, ''];
-  while (after.length && after[0].trim() === '') after.shift();
-  if (after.length) parts.push(...after);
-  return parts.join('\n');
-}
-
 // 改动前快照当前 config.toml → 配置历史
 function snapshotConfig() {
   if (!fs.existsSync(CONFIG_PATH)) return null;
@@ -971,32 +943,6 @@ function restoreHistory(file) {
   fs.writeFileSync(CONFIG_PATH, text);
   cfgMtime = 0; loadConfig();
   return safe;
-}
-
-// 规范化前端提交的 provider 对象(models 支持数组或逗号/换行分隔字符串)
-function normalizeProvider(p) {
-  const id = String(p.id || '').trim();
-  if (!id) throw new Error('provider id 不能为空');
-  if (!/^[A-Za-z0-9_.-]+$/.test(id)) throw new Error(`provider id 只能含字母/数字/_/-/.(收到 '${id}')`);
-  const auth = String(p.auth || 'bearer').trim();
-  if (!['bearer', 'chatgpt_subscription', 'chatgpt_oauth', 'passthrough'].includes(auth)) {
-    throw new Error(`未知 auth 类型 '${auth}'`);
-  }
-  const rawModels = Array.isArray(p.models) ? p.models : String(p.models || '').split(/[\n,，;]+/);
-  const models = [...new Set(rawModels.map((m) => String(m).trim()).filter(Boolean))];
-  const o = {
-    id,
-    name: String(p.name || id).trim(),
-    base_url: String(p.base_url || '').trim(),
-    auth,
-  };
-  if (auth === 'bearer' || auth === 'chatgpt_oauth') {
-    if (p.token_env && String(p.token_env).trim()) o.token_env = String(p.token_env).trim();
-    if (p.token && String(p.token).trim()) o.token = String(p.token).trim();
-  }
-  o.models = models;
-  o.enabled = !(p.enabled === false || p.enabled === 'false');
-  return o;
 }
 
 // 所有 provider 变更的统一通道:解析 → 变更 → 重组 TOML → 校验 → 快照 → 写盘 → 热重载

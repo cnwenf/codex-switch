@@ -1,5 +1,5 @@
 // codex-switch — model capability resolution.
-// Data flows: [model_overrides in config.toml] > [live fetch from Bailian /api/v1/models]
+// Data flows: [model_overrides in config.toml] > [provider discovery cache]
 //             > [built-in static table below] > [conservative default].
 // Capabilities feed the generated catalog.json consumed by Codex
 // (codex-rs ModelInfo schema, codex-rs/protocol/src/openai_models.rs).
@@ -106,76 +106,25 @@ const EFFORT_DESCRIPTIONS = {
   ultra: 'Ultra (multi-agent)',
 };
 
-// ---------- live fetch from Bailian native model-list API ----------
-// GET /api/v1/models (DashScope native, not compatible-mode) returns per-model
-// model_info.context_window / inference_metadata.request_modality (Text/Image/Audio/Video).
-// 文档: help.aliyun.com/zh/model-studio/list-models
 const CAPS_TTL_MS = 30 * 60 * 1000;
-const capsCache = new Map(); // providerId -> { at, models: Map<modelId, {contextWindow, vision}> }
+const capsCache = new Map();
 
-export function bailianModelsUrl(baseUrl) {
-  try {
-    const u = new URL(String(baseUrl || ''));
-    const h = u.hostname;
-    if (h === 'dashscope.aliyuncs.com' || h === 'dashscope-intl.aliyuncs.com' || h.endsWith('.maas.aliyuncs.com')) {
-      return `${u.protocol}//${h}/api/v1/models`;
-    }
-  } catch {}
-  return null;
-}
-
-async function fetchBailianPage(modelsUrl, token, pageNo) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 10000);
-  try {
-    const r = await fetch(`${modelsUrl}?page_size=100&page_no=${pageNo}`, {
-      headers: { authorization: `Bearer ${token}` },
-      signal: ctl.signal,
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const j = await r.json();
-    if (!j || j.success !== true || !j.output) throw new Error(`bad response: ${JSON.stringify(j?.message || j?.code || j).slice(0, 200)}`);
-    return j.output;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// Returns Map<modelId, {contextWindow, vision}> for the provider's own model list,
-// or null when the provider is not a Bailian endpoint (no auto-fetch).
-export async function fetchProviderCaps(provider) {
-  const modelsUrl = bailianModelsUrl(provider.base_url);
-  if (!modelsUrl) return null;
-  const token = (provider.token_env && process.env[provider.token_env]) || provider.token;
-  if (!token) throw new Error(`no token (env ${provider.token_env || 'token'} unset)`);
-
-  const want = new Set(provider.models || []);
-  const found = new Map();
-  let total = Infinity;
-  for (let page = 1; page <= 5 && found.size < want.size; page++) {
-    const out = await fetchBailianPage(modelsUrl, token, page);
-    total = Number(out.total) || 0;
-    if (!Array.isArray(out.models) || out.models.length === 0) break;
-    for (const m of out.models) {
-      if (!want.has(m.model)) continue;
-      const mi = m.model_info || {};
-      const cw = Number.isFinite(mi.context_window) ? mi.context_window : mi.max_input_tokens;
-      const modalities = m.inference_metadata?.request_modality || [];
-      found.set(m.model, {
-        contextWindow: Number.isFinite(cw) ? cw : null,
-        vision: modalities.includes('Image'),
-      });
-      if (found.size >= want.size) break;
-    }
-    if (page * 100 >= total) break;
-  }
-  return found;
+export function cacheDiscoveredModels(providerId, models) {
+  capsCache.set(providerId, {
+    at: Date.now(),
+    models: new Map(models.map((model) => [model.id, {
+      contextWindow: model.contextWindow,
+      vision: model.input?.image === true,
+      reasoning: model.reasoning,
+      source: model.source,
+    }])),
+  });
 }
 
 export { capsCache, CAPS_TTL_MS };
 
 // ---------- resolution ----------
-// Priority: config.toml [model_overrides] > cached Bailian fetch > static > default.
+// Priority: config.toml [model_overrides] > provider discovery > static > default.
 export function resolveCaps(config, provider, modelId) {
   const over = config.model_overrides?.[modelId];
   const cached = capsCache.get(provider.id);
@@ -183,14 +132,16 @@ export function resolveCaps(config, provider, modelId) {
   const stat = STATIC_CAPS[modelId] || DEFAULT_CAPS;
   let source;
   if (over) source = 'config override';
-  else if (fetched) source = 'bailian api';
+  else if (fetched) source = `provider discovery (${fetched.source || 'unknown'})`;
   else if (STATIC_CAPS[modelId]) source = 'built-in static';
   else source = 'default (unknown model)';
   return {
     contextWindow: over?.context_window ?? fetched?.contextWindow ?? stat.contextWindow,
     vision: !!(over?.vision ?? fetched?.vision ?? stat.vision),
-    levels: over?.reasoning_efforts ?? stat.levels,
-    defaultLevel: over?.default_reasoning_effort ?? stat.defaultLevel ?? (stat.levels.includes('medium') ? 'medium' : null),
+    levels: over?.reasoning_efforts ?? (fetched?.reasoning === false ? [] : stat.levels),
+    defaultLevel: over?.default_reasoning_effort
+      ?? (fetched?.reasoning === false ? null : stat.defaultLevel)
+      ?? (stat.levels.includes('medium') ? 'medium' : null),
     source,
   };
 }
