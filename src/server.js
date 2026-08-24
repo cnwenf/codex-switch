@@ -8,7 +8,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execFile, spawn } from 'node:child_process';
+import https from 'node:https';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import TOML from '@iarna/toml';
@@ -1171,6 +1172,9 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
   .tabs{order:3;width:100%;justify-content:center}
   #backupList ul{columns:1}
 }
+.upd-bar{display:inline-block;width:150px;height:8px;border-radius:4px;background:rgba(255,255,255,.14);overflow:hidden;vertical-align:middle;margin-left:.4rem}
+.upd-fill{display:block;height:100%;width:0;background:#3ddc97;transition:width .3s}
+.chip.warn{color:#e8b33d;border-color:rgba(232,179,61,.6)}
 </style>
 </head>
 <body>
@@ -1186,6 +1190,8 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
   <div class="chips">
     <span class="chip"><span class="dot on"></span>运行中</span>
     <span class="chip">${esc(host)}:${port}</span>
+    <span class="chip" title="当前版本">v${esc(PKG_VERSION)}</span>
+    <span id="updArea"></span>
   </div>
 </header>
 <main>
@@ -1611,10 +1617,278 @@ function toggleAutostart(){
   }).catch(function(e){chk.disabled=false;setMsg(e.message,false);loadAutostart();});
 }
 
+/* ---------- 检查更新 ---------- */
+var UPD_POLL=null;
+function initUpdate(){
+  api('/__admin/update/check').then(function(j){
+    if(j.ok===false)return;
+    if(j.newer&&j.assetUrl){
+      var a=$('updArea');
+      if(a)a.innerHTML='<span class="chip warn">发现新版本 v'+escH(j.latest)+'</span><button class="btn small primary" onclick="startUpdate()">更新</button>';
+    }
+  }).catch(function(){});
+}
+function startUpdate(){
+  var a=$('updArea');
+  if(!a)return;
+  a.innerHTML='<span class="upd-bar"><span class="upd-fill" id="updFill"></span></span><span class="muted" id="updText" style="margin-left:.4rem">准备中…</span>';
+  api('/__admin/update/run',{}).then(function(j){
+    if(j.ok===false){updFail(j.error||'启动更新失败');return;}
+    pollUpdate();
+  }).catch(function(e){updFail(e.message);});
+}
+function pollUpdate(){
+  clearTimeout(UPD_POLL);
+  api('/__admin/update/status').then(function(j){
+    var st=j.state||{};
+    var fill=$('updFill'),txt=$('updText');
+    if(!fill||!txt)return;
+    if(st.phase==='downloading'){
+      if(st.total>0){var pct=Math.min(99,Math.floor(st.downloaded/st.total*100));fill.style.width=pct+'%';txt.textContent='下载中 '+pct+'%('+fmtSize(st.downloaded)+'/'+fmtSize(st.total)+')';}
+      else{txt.textContent=st.detail||'正在获取更新包…';}
+      UPD_POLL=setTimeout(pollUpdate,700);
+    }else if(st.phase==='installing'){
+      fill.style.width='100%';txt.textContent=st.detail||'正在安装…';
+      UPD_POLL=setTimeout(pollUpdate,700);
+    }else if(st.phase==='done'){
+      fill.style.width='100%';txt.textContent=st.detail||'更新完成,正在重启…';
+      if(j.mode==='source'){txt.textContent=(st.detail||'更新完成')+'(页面即将自动刷新)';setTimeout(function(){location.reload();},6000);}
+    }else if(st.phase==='error'){
+      updFail(st.detail||'更新失败');
+    }else{
+      if(st.detail)txt.textContent=st.detail;
+      UPD_POLL=setTimeout(pollUpdate,700);
+    }
+  }).catch(function(e){updFail(e.message);});
+}
+function updFail(msg){
+  var a=$('updArea');
+  if(a)a.innerHTML='<span class="chip warn" title="'+escH(msg)+'">更新失败</span><button class="btn small" onclick="initUpdate()">重试</button>';
+  toast('更新失败: '+msg,false);
+}
+
 loadProviders();
 loadAutostart();
+initUpdate();
 </script>
 </body></html>`;
+}
+
+// ---------- 检查更新 / 自动安装(仅本机 127.0.0.1 管理页可触发) ----------
+const PKG_VERSION = (() => {
+  try { return String(JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version || '0.0.0'); } catch { return '0.0.0'; }
+})();
+const GITHUB_REPO = 'cnwenf/codex-switch';
+const IS_APP_MODE = process.execPath.includes('.app/Contents/');
+const REPO_ROOT = path.resolve(__dirname, '..');
+
+function updateMode() {
+  if (IS_APP_MODE) return 'app';
+  return fs.existsSync(path.join(REPO_ROOT, '.git')) ? 'source' : 'unknown';
+}
+
+function cmpVersion(a, b) {
+  const pa = String(a).replace(/^v/, '').split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = String(b).replace(/^v/, '').split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  return 0;
+}
+
+// DoH(阿里 223.5.5.5)解析真实 IP,用于绕过本地 DNS 污染
+function dohResolve(host) {
+  return new Promise((resolve, reject) => {
+    const req = https.get({
+      host: '223.5.5.5', path: '/resolve?name=' + encodeURIComponent(host) + '&type=A',
+      headers: { accept: 'application/dns-json' }, timeout: 5000,
+    }, (res) => {
+      let d = '';
+      res.on('data', (c) => (d += c));
+      res.on('end', () => {
+        try {
+          const ans = (JSON.parse(d).Answer || []).find((x) => x.type === 1);
+          if (ans) resolve(ans.data); else reject(new Error('no A record: ' + host));
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('DoH timeout')));
+  });
+}
+
+function httpsGetUrl(urlStr, opts) {
+  opts = opts || {};
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const headers = { 'user-agent': 'codex-switch/' + PKG_VERSION, accept: opts.accept || '*/*' };
+    if (opts.ip) headers.host = u.hostname;
+    const req = https.request({
+      host: opts.ip || u.hostname, port: 443, path: u.pathname + u.search, method: 'GET',
+      servername: opts.ip ? u.hostname : undefined,
+      headers, timeout: opts.timeout || 10000,
+    }, resolve);
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('timeout: ' + u.hostname)));
+    req.end();
+  });
+}
+
+// 先直连;失败或遭遇 DNS 污染特征(403)时,用 DoH 解析真实 IP 并以 SNI 方式重试;自动跟随重定向。
+async function ghFetch(urlStr, opts) {
+  opts = opts || {};
+  let res = null, directErr = null;
+  try { res = await httpsGetUrl(urlStr, opts); } catch (e) { directErr = e; }
+  if (!res || res.statusCode === 403) {
+    if (res) res.resume();
+    const u = new URL(urlStr);
+    if (!opts.ip) {
+      const ip = await dohResolve(u.hostname).catch(() => null);
+      if (!ip) throw directErr || new Error('resolve failed: ' + u.hostname);
+      return ghFetch(urlStr, { ...opts, ip });
+    }
+    throw directErr || new Error('HTTP 403 via pinned ip for ' + u.hostname);
+  }
+  if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+    const loc = res.headers.location;
+    res.resume();
+    if (!loc) throw new Error('redirect without location');
+    if ((opts.redirects || 0) >= 5) throw new Error('too many redirects');
+    return ghFetch(new URL(loc, urlStr).toString(), { ...opts, redirects: (opts.redirects || 0) + 1, ip: undefined });
+  }
+  return res;
+}
+
+async function ghFetchJson(urlStr) {
+  const res = await ghFetch(urlStr, { accept: 'application/vnd.github+json' });
+  const chunks = [];
+  for await (const c of res) chunks.push(c);
+  if (res.statusCode !== 200) throw new Error('HTTP ' + res.statusCode);
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+async function updateCheck() {
+  try {
+    const rel = await ghFetchJson('https://api.github.com/repos/' + GITHUB_REPO + '/releases/latest');
+    const latest = String(rel.tag_name || '').replace(/^v/, '');
+    const asset = (rel.assets || []).find((a) => /\.dmg$/i.test(a.name || '')) || null;
+    return {
+      ok: true, mode: updateMode(), current: PKG_VERSION, latest,
+      newer: cmpVersion(latest, PKG_VERSION) > 0,
+      assetName: asset ? asset.name : null,
+      assetUrl: asset ? asset.browser_download_url : null,
+      assetSize: asset ? (asset.size || 0) : 0,
+      releaseUrl: rel.html_url || '',
+    };
+  } catch (e) {
+    return { ok: false, error: '检查更新失败: ' + e.message, current: PKG_VERSION, mode: updateMode() };
+  }
+}
+
+const updateState = { phase: 'idle', pct: 0, downloaded: 0, total: 0, detail: '' };
+
+function execFileP(file, args, opts) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { timeout: 180000, maxBuffer: 16 * 1024 * 1024, ...(opts || {}) }, (err, stdout, stderr) => {
+      if (err) reject(new Error(file + ' 失败: ' + String(stderr || err.message).trim()));
+      else resolve(stdout);
+    });
+  });
+}
+
+function startUpdate() {
+  if (updateState.phase === 'checking' || updateState.phase === 'downloading' || updateState.phase === 'installing') {
+    return { ok: false, error: '更新正在进行中' };
+  }
+  const mode = updateMode();
+  if (mode === 'unknown') return { ok: false, error: '无法识别安装方式(既非 .app 也非 git 源码目录),请手动更新' };
+  runUpdatePipeline(mode).catch((e) => {
+    updateState.phase = 'error';
+    updateState.detail = String(e.message);
+  });
+  return { ok: true, mode };
+}
+
+async function runUpdatePipeline(mode) {
+  updateState.phase = 'checking'; updateState.pct = 0; updateState.downloaded = 0; updateState.total = 0;
+  updateState.detail = '正在查询最新版本…';
+  const chk = await updateCheck();
+  if (chk.ok === false) throw new Error(chk.error);
+  if (!chk.newer) { updateState.phase = 'idle'; updateState.detail = ''; throw new Error('当前已是最新版本 v' + chk.current); }
+  if (mode === 'source') return runSourceUpdate();
+  if (!chk.assetUrl) throw new Error('该 Release 未附带 DMG 安装包');
+
+  updateState.phase = 'downloading';
+  updateState.detail = '正在下载 ' + chk.assetName + ' …';
+  const dlDir = path.join(os.homedir(), '.codex-switch', 'downloads');
+  fs.mkdirSync(dlDir, { recursive: true });
+  const dest = path.join(dlDir, chk.assetName);
+  const tmp = dest + '.part';
+  const res = await ghFetch(chk.assetUrl, { timeout: 20000 });
+  if (res.statusCode !== 200) { res.resume(); throw new Error('下载失败: HTTP ' + res.statusCode); }
+  updateState.total = parseInt(res.headers['content-length'] || '0', 10) || chk.assetSize || 0;
+  await new Promise((resolve, reject) => {
+    const ws = fs.createWriteStream(tmp);
+    res.on('data', (c) => {
+      updateState.downloaded += c.length;
+      if (updateState.total > 0) updateState.pct = Math.min(99, Math.floor((updateState.downloaded / updateState.total) * 100));
+    });
+    res.on('error', reject);
+    ws.on('error', reject);
+    ws.on('finish', resolve);
+    res.pipe(ws);
+  });
+  fs.renameSync(tmp, dest);
+  updateState.pct = 100;
+
+  updateState.phase = 'installing';
+  updateState.detail = '正在安装到 /Applications…';
+  await installDmg(dest);
+
+  updateState.phase = 'done';
+  updateState.detail = '更新完成,正在重启应用…';
+  const child = spawn('/bin/sh', ['-c', 'sleep 1; kill ' + process.pid + ' 2>/dev/null; sleep 1; open "/Applications/Codex Switch.app"'], { detached: true, stdio: 'ignore' });
+  child.unref();
+}
+
+async function installDmg(dmgPath) {
+  const APP = 'Codex Switch';
+  const out = await execFileP('hdiutil', ['attach', dmgPath, '-nobrowse', '-readonly', '-plist']);
+  const m = out.match(/<string>(\/Volumes\/[^<]+)<\/string>/);
+  if (!m) throw new Error('无法解析 DMG 挂载点');
+  const mount = m[1];
+  try {
+    const src = path.join(mount, APP + '.app');
+    if (!fs.existsSync(src)) throw new Error('DMG 内未找到 ' + APP + '.app');
+    const dst = '/Applications/' + APP + '.app';
+    fs.rmSync(dst, { recursive: true, force: true });
+    await execFileP('cp', ['-R', src, '/Applications/']);
+    await execFileP('xattr', ['-cr', dst]).catch(() => {});
+  } finally {
+    await execFileP('hdiutil', ['detach', mount]).catch(() => {});
+  }
+}
+
+async function runSourceUpdate() {
+  updateState.phase = 'downloading';
+  updateState.total = 0; updateState.pct = 0;
+  updateState.detail = '正在 git pull 拉取最新代码…';
+  const dirty = await execFileP('git', ['-C', REPO_ROOT, 'status', '--porcelain']);
+  if (dirty.trim()) {
+    throw new Error('源码目录存在未提交改动,请先提交或 stash 后再更新:' + dirty.trim().split('\n').slice(0, 3).join(', '));
+  }
+  await execFileP('git', ['-C', REPO_ROOT, 'pull', '--ff-only', 'origin', 'main']);
+  updateState.phase = 'installing';
+  updateState.pct = 100;
+  updateState.detail = '正在重启服务…';
+  const startSh = path.join(REPO_ROOT, 'scripts', 'start.sh');
+  const logFile = path.join(os.homedir(), '.codex-switch', 'run.log');
+  const cmd = 'sleep 1; kill ' + process.pid + ' 2>/dev/null; sleep 1; nohup sh "' + startSh + '" >> "' + logFile + '" 2>&1 &';
+  const child = spawn('/bin/sh', ['-c', cmd], { detached: true, stdio: 'ignore' });
+  child.unref();
+  updateState.phase = 'done';
+  updateState.detail = '更新完成,正在重启…';
 }
 
 async function handleAdmin(req, bodyBuf, res) {
@@ -1687,6 +1961,25 @@ async function handleAdmin(req, bodyBuf, res) {
       }
       if (req.method === 'POST' && p === '/__admin/env-keys/delete') {
         return sendJson(res, 200, deleteEnvKey(String(body.name || '')));
+      }
+    } catch (e) {
+      return sendJson(res, 400, { error: String(e.message) });
+    }
+    return sendJson(res, 404, { error: 'not found', path: p });
+  }
+
+  // ---------- 检查更新 / 自动安装 ----------
+  if (p.startsWith('/__admin/update')) {
+    try {
+      if (req.method === 'GET' && p === '/__admin/update/check') {
+        return sendJson(res, 200, await updateCheck());
+      }
+      if (req.method === 'POST' && p === '/__admin/update/run') {
+        const j = startUpdate();
+        return sendJson(res, j.ok === false ? 400 : 200, j);
+      }
+      if (req.method === 'GET' && p === '/__admin/update/status') {
+        return sendJson(res, 200, { ok: true, state: updateState, mode: updateMode() });
       }
     } catch (e) {
       return sendJson(res, 400, { error: String(e.message) });
