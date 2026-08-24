@@ -34,7 +34,7 @@ test('OpenRouter validation and user models normalize capabilities', async () =>
   });
   assert.equal(result.validation.status, 'valid');
   assert.deepEqual(result.models[0].input, { text: true, image: true, audio: false, video: false, file: false });
-  assert.deepEqual(result.models[0].output, { text: true, image: false, audio: false });
+  assert.deepEqual(result.models[0].output, { text: true, image: false, audio: false, video: false });
   assert.equal(result.models[0].tools, true);
   assert.equal(result.models[0].reasoning, true);
   assert.equal(result.models[0].contextWindow, 131072);
@@ -60,7 +60,41 @@ test('a complete modalities array marks omitted modalities false', () => {
     output_modalities: ['text'],
   }, 'api');
   assert.deepEqual(model.input, { text: true, image: false, audio: true, video: false, file: false });
-  assert.deepEqual(model.output, { text: true, image: false, audio: false });
+  assert.deepEqual(model.output, { text: true, image: false, audio: false, video: false });
+});
+
+test('Bailian official capability codes infer input and output modalities', () => {
+  const cases = [
+    ['TG', 'input', 'text'],
+    ['TG', 'output', 'text'],
+    ['VU', 'input', 'image'],
+    ['VU', 'output', 'text'],
+    ['IG', 'input', 'text'],
+    ['IG', 'output', 'image'],
+    ['VG', 'input', 'text'],
+    ['VG', 'output', 'video'],
+    ['ASR', 'input', 'audio'],
+    ['ASR', 'output', 'text'],
+    ['TTS', 'input', 'text'],
+    ['TTS', 'output', 'audio'],
+  ];
+  for (const [capability, direction, modality] of cases) {
+    const model = normalizeOpenAIModel({ id: capability, capabilities: [capability] }, 'api');
+    assert.equal(model[direction][modality], true, `${capability} ${direction}.${modality}`);
+  }
+  const textModel = normalizeOpenAIModel({ id: 'text-only', capabilities: ['TG'] }, 'api');
+  assert.equal(textModel.output.video, 'unknown');
+});
+
+test('explicit modality arrays override Bailian capability inference', () => {
+  const model = normalizeOpenAIModel({
+    id: 'explicit-overrides',
+    capabilities: ['VG'],
+    input_modalities: ['audio'],
+    output_modalities: ['text'],
+  }, 'api');
+  assert.deepEqual(model.input, { text: false, image: false, audio: true, video: false, file: false });
+  assert.deepEqual(model.output, { text: true, image: false, audio: false, video: false });
 });
 
 test('unsupported vendors never make network calls', async () => {
@@ -80,6 +114,20 @@ test('status codes map without leaking upstream body or key', async () => {
   assert.equal(result.validation.status, 'invalid');
   assert.equal(JSON.stringify(result).includes('secret-401'), false);
   assert.equal(JSON.stringify(result).includes('bad'), false);
+});
+
+test('successful model discovery skips model ids and names that echo the API key', async () => {
+  const apiKey = 'fixture-success-echo-key';
+  const result = await discoverProvider({ providerType: 'openai', providerOptions: {}, apiKey }, {
+    fetchImpl: async () => response(200, { data: [
+      { id: apiKey, name: 'Unsafe ID' },
+      { id: 'unsafe-name-model', name: `Unsafe ${apiKey}` },
+      { id: 'clean-model', name: 'Clean Model' },
+    ] }),
+  });
+  assert.deepEqual(result.models.map((model) => model.id), ['clean-model']);
+  assert.equal(JSON.stringify(result).includes(apiKey), false);
+  assert.equal(result.warnings.every((warning) => !warning.includes(apiKey)), true);
 });
 
 test('generic Models adapters use their resolved endpoint and normalize API identities', async () => {
@@ -173,6 +221,19 @@ test('Tencent TokenHub keeps only online Responses-compatible models', async () 
   });
   assert.deepEqual(result.models.map((model) => model.id), ['native', 'compatible', 'hy3']);
   assert.equal(result.models.every((model) => model.responses === true), true);
+});
+
+test('TokenHub static matrix excludes glm-5-turbo and glm-5 without explicit Responses metadata', async () => {
+  const result = await discoverProvider({
+    providerType: 'tencent-tokenhub', providerOptions: { site: 'cn' }, apiKey: 'fixture-key',
+  }, {
+    fetchImpl: async () => response(200, { data: [
+      { id: 'hy3', status: 'online' },
+      { id: 'glm-5-turbo', status: 'online' },
+      { id: 'glm-5', status: 'online' },
+    ] }),
+  });
+  assert.deepEqual(result.models.map((model) => model.id), ['hy3']);
 });
 
 test('Bailian follows bounded native pagination', async () => {
@@ -303,6 +364,41 @@ test('cross-origin redirects cannot forward the bearer key', async () => {
   assert.equal(JSON.stringify(result).includes('fixture-redirect-key'), false);
 });
 
+test('an API key embedded in the initial URL path is rejected before fetch', async () => {
+  const apiKey = 'fixture-initial-url-key';
+  let called = false;
+  const result = await discoverProvider({
+    providerType: 'custom', baseUrl: `https://gateway.example.test/${apiKey}/v1`, apiKey,
+  }, {
+    fetchImpl: async () => {
+      called = true;
+      return response(200, { data: [{ id: 'model' }] });
+    },
+  });
+  assert.equal(called, false);
+  assert.equal(result.validation.status, 'unreachable');
+  assert.equal(JSON.stringify(result).includes(apiKey), false);
+});
+
+test('an API key embedded in a same-origin redirect path is rejected before the next fetch', async () => {
+  const apiKey = 'fixture-redirect-url-key';
+  const calls = [];
+  const result = await discoverProvider({
+    providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey,
+  }, {
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return new Response(null, {
+        status: 302,
+        headers: { location: `https://gateway.example.test/${apiKey}/models` },
+      });
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.validation.status, 'unreachable');
+  assert.equal(JSON.stringify(result).includes(apiKey), false);
+});
+
 test('cross-origin pagination links cannot forward the bearer key', async () => {
   const calls = [];
   const result = await discoverProvider({
@@ -319,6 +415,25 @@ test('cross-origin pagination links cannot forward the bearer key', async () => 
   assert.equal(calls.length, 1);
   assert.equal(result.validation.status, 'unreachable');
   assert.equal(JSON.stringify(result).includes('fixture-pagination-key'), false);
+});
+
+test('an API key embedded in a same-origin pagination path is rejected before the next fetch', async () => {
+  const apiKey = 'fixture-pagination-url-key';
+  const calls = [];
+  const result = await discoverProvider({
+    providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey,
+  }, {
+    fetchImpl: async (url) => {
+      calls.push(String(url));
+      return response(200, {
+        data: [{ id: 'first-page-model' }],
+        next: `https://gateway.example.test/${apiKey}/models?page=2`,
+      });
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(result.validation.status, 'unreachable');
+  assert.equal(JSON.stringify(result).includes(apiKey), false);
 });
 
 test('oversized responses fail safely without returning body or secret material', async () => {
@@ -350,6 +465,28 @@ test('response streaming is cancelled as soon as the 4 MiB limit is crossed', as
   });
   assert.equal(result.validation.status, 'unreachable');
   assert.equal(cancelled, true);
+});
+
+test('an untrusted non-resolving stream cancel cannot block discovery settlement', async () => {
+  let cancelCalled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(5 * 1024 * 1024));
+    },
+    cancel() {
+      cancelCalled = true;
+      return new Promise(() => {});
+    },
+  });
+  const settled = await Promise.race([
+    discoverProvider({ providerType: 'openai', providerOptions: {}, apiKey: 'fixture-key' }, {
+      fetchImpl: async () => new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
+    }),
+    new Promise((resolve) => setTimeout(() => resolve('cancel-blocked'), 100)),
+  ]);
+  assert.notEqual(settled, 'cancel-blocked');
+  assert.equal(settled.validation.status, 'unreachable');
+  assert.equal(cancelCalled, true);
 });
 
 test('thrown errors and URLs are reduced to stable sanitized messages', async () => {

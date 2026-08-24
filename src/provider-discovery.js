@@ -8,7 +8,7 @@ const MAX_MODELS = 2_000;
 const MAX_REDIRECTS = 3;
 
 const INPUT_MODALITIES = Object.freeze(['text', 'image', 'audio', 'video', 'file']);
-const OUTPUT_MODALITIES = Object.freeze(['text', 'image', 'audio']);
+const OUTPUT_MODALITIES = Object.freeze(['text', 'image', 'audio', 'video']);
 
 const STATIC_CATALOGS = Object.freeze({
   openai: Object.freeze([
@@ -48,8 +48,6 @@ const TENCENT_RESPONSES_MODELS = new Set([
   'glm-5.3',
   'glm-5.2',
   'glm-5.1',
-  'glm-5-turbo',
-  'glm-5',
   'kimi-k3',
   'kimi-k2.7-code',
   'kimi-k2.7-code-highspeed',
@@ -144,6 +142,40 @@ function normalizeModalitySet(value, names) {
   return Object.fromEntries(names.map((name) => [name, UNKNOWN]));
 }
 
+function inferModalitiesFromCapabilities(value) {
+  const inferred = emptyModalities();
+  if (!Array.isArray(value)) return inferred;
+  const capabilities = new Set(value.map((item) => String(item).trim().toUpperCase()));
+  const mark = (direction, ...modalities) => {
+    for (const modality of modalities) inferred[direction][modality] = true;
+  };
+  if (capabilities.has('TG')) {
+    mark('input', 'text');
+    mark('output', 'text');
+  }
+  if (capabilities.has('VU')) {
+    mark('input', 'text', 'image');
+    mark('output', 'text');
+  }
+  if (capabilities.has('IG')) {
+    mark('input', 'text');
+    mark('output', 'image');
+  }
+  if (capabilities.has('VG')) {
+    mark('input', 'text');
+    mark('output', 'video');
+  }
+  if (capabilities.has('ASR')) {
+    mark('input', 'audio');
+    mark('output', 'text');
+  }
+  if (capabilities.has('TTS')) {
+    mark('input', 'text');
+    mark('output', 'audio');
+  }
+  return inferred;
+}
+
 function parameterCapability(model, names) {
   const parameters = firstDefined(model.supported_parameters, model.supportedParameters);
   if (!Array.isArray(parameters)) return UNKNOWN;
@@ -159,6 +191,23 @@ function listedCapability(value, names) {
 
 function preferKnown(...values) {
   return values.find((value) => value !== UNKNOWN) ?? UNKNOWN;
+}
+
+function containsExactSecret(value, apiKey) {
+  return typeof apiKey === 'string' && apiKey.length > 0 && String(value).includes(apiKey);
+}
+
+function redactExactSecret(value, apiKey) {
+  if (!apiKey) return value;
+  if (typeof value === 'string') return value.replaceAll(apiKey, '[redacted]');
+  if (Array.isArray(value)) return value.map((item) => redactExactSecret(item, apiKey));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      redactExactSecret(item, apiKey),
+    ]));
+  }
+  return value;
 }
 
 function protocolCapability(model) {
@@ -179,6 +228,7 @@ export function normalizeOpenAIModel(model, source = 'api') {
   if (typeof idValue !== 'string' || !idValue.trim()) return null;
   const id = idValue.trim();
   const modalities = emptyModalities();
+  const inferredModalities = inferModalitiesFromCapabilities(model.capabilities);
   const inputMetadata = firstDefined(
     model.input_modalities,
     model.inputModalities,
@@ -187,6 +237,7 @@ export function normalizeOpenAIModel(model, source = 'api') {
     model.inference_metadata?.request_modality,
     model.inference_metadata?.requestModalities,
     model.modalities?.input,
+    inferredModalities.input,
   );
   const outputMetadata = firstDefined(
     model.output_modalities,
@@ -196,6 +247,7 @@ export function normalizeOpenAIModel(model, source = 'api') {
     model.inference_metadata?.response_modality,
     model.inference_metadata?.responseModalities,
     model.modalities?.output,
+    inferredModalities.output,
   );
   modalities.input = normalizeModalitySet(inputMetadata, INPUT_MODALITIES);
   modalities.output = normalizeModalitySet(outputMetadata, OUTPUT_MODALITIES);
@@ -292,25 +344,32 @@ function mergeNormalizedModel(apiModel, staticModel, rawApi) {
   };
 }
 
-function normalizeModels(rawModels, providerType, source, warnings) {
+function normalizeModels(rawModels, providerType, source, warnings, apiKey) {
   const staticModels = new Map((STATIC_CATALOGS[providerType] || []).map((raw) => {
     const normalized = normalizeOpenAIModel(raw, 'static');
     return [normalized.id, normalized];
   }));
   const byId = new Map();
   let malformed = 0;
+  let unsafe = 0;
   for (const raw of Array.isArray(rawModels) ? rawModels : []) {
     const apiModel = normalizeOpenAIModel(raw, source);
     if (!apiModel) {
       malformed += 1;
       continue;
     }
-    byId.set(apiModel.id, source === 'api'
+    const normalized = source === 'api'
       ? mergeNormalizedModel(apiModel, staticModels.get(apiModel.id), raw)
-      : apiModel);
+      : apiModel;
+    if (containsExactSecret(JSON.stringify(normalized), apiKey)) {
+      unsafe += 1;
+      continue;
+    }
+    byId.set(apiModel.id, normalized);
     if (byId.size >= MAX_MODELS) break;
   }
   if (malformed) warnings.push('Some malformed model entries were skipped.');
+  if (unsafe) warnings.push('Some model entries containing sensitive data were skipped.');
   if ((Array.isArray(rawModels) ? rawModels.length : 0) > MAX_MODELS) {
     warnings.push('Model discovery was limited to 2,000 entries.');
   }
@@ -379,23 +438,31 @@ async function readBoundedResponse(response, signal) {
   const reader = response.body.getReader();
   const chunks = [];
   let size = 0;
+  let cancellationRequested = false;
+  const cancelWithoutWaiting = () => {
+    if (cancellationRequested) return;
+    cancellationRequested = true;
+    try {
+      Promise.resolve(reader.cancel()).catch(() => {});
+    } catch { /* An untrusted stream may throw synchronously from cancel. */ }
+  };
   try {
     while (true) {
       const { done, value } = await readWithAbort(reader, signal);
       if (done) break;
       size += value.byteLength;
       if (size > MAX_RESPONSE_BYTES) {
-        await reader.cancel();
+        cancelWithoutWaiting();
         throw new DiscoverySafetyError('response_too_large');
       }
       chunks.push(value);
     }
   } catch (error) {
-    try { await reader.cancel(); } catch { /* The stream may already be errored. */ }
+    cancelWithoutWaiting();
     if (error instanceof DiscoverySafetyError) throw error;
     throw new DiscoverySafetyError('network');
   } finally {
-    reader.releaseLock();
+    try { reader.releaseLock(); } catch { /* A cancelled pending read may retain the lock briefly. */ }
   }
   const bytes = new Uint8Array(size);
   let offset = 0;
@@ -408,6 +475,7 @@ async function readBoundedResponse(response, signal) {
 
 async function requestJson(context, initialUrl) {
   let url = validateDiscoveryUrl(initialUrl, context.providerType);
+  if (containsExactSecret(url.toString(), context.apiKey)) throw new DiscoverySafetyError('unsafe_url');
   const initialClass = destinationClass(url);
   const initialOrigin = url.origin;
   for (let redirects = 0; ; redirects += 1) {
@@ -433,6 +501,7 @@ async function requestJson(context, initialUrl) {
       } catch {
         throw new DiscoverySafetyError('unsafe_redirect');
       }
+      if (containsExactSecret(next.toString(), context.apiKey)) throw new DiscoverySafetyError('unsafe_redirect');
       if (destinationClass(next) !== initialClass || next.origin !== initialOrigin) {
         throw new DiscoverySafetyError('unsafe_redirect');
       }
@@ -453,19 +522,24 @@ async function requestJson(context, initialUrl) {
   }
 }
 
-function nextPageUrl(body, currentUrl) {
+function nextPageUrl(body, currentUrl, apiKey) {
   const next = firstDefined(body?.next, body?.next_page, body?.pagination?.next, body?.meta?.next);
   if (typeof next === 'string' && next) {
     const current = new URL(currentUrl);
     const resolved = new URL(next, current);
-    if (resolved.origin !== current.origin || resolved.username || resolved.password) {
+    if (resolved.origin !== current.origin
+      || resolved.username
+      || resolved.password
+      || containsExactSecret(resolved.toString(), apiKey)) {
       throw new DiscoverySafetyError('unsafe_pagination');
     }
     return resolved.toString();
   }
   if (body?.has_more && typeof body?.last_id === 'string' && body.last_id) {
+    if (containsExactSecret(body.last_id, apiKey)) throw new DiscoverySafetyError('unsafe_pagination');
     const url = new URL(currentUrl);
     url.searchParams.set('after', body.last_id);
+    if (containsExactSecret(url.toString(), apiKey)) throw new DiscoverySafetyError('unsafe_pagination');
     return url.toString();
   }
   return null;
@@ -478,7 +552,7 @@ async function collectOpenAIModels(context, initialUrl) {
   for (let page = 0; page < MAX_PAGES && url && collected.length < MAX_MODELS; page += 1) {
     const body = await requestJson(context, url);
     if (Array.isArray(body?.data)) collected.push(...body.data.slice(0, MAX_MODELS - collected.length));
-    const next = nextPageUrl(body, url);
+    const next = nextPageUrl(body, url, context.apiKey);
     limitedByPages = page === MAX_PAGES - 1 && Boolean(next);
     url = next;
   }
@@ -677,27 +751,34 @@ export async function discoverProvider(input, dependencies = {}) {
     providerOptions: connection.providerOptions,
     fetchImpl: dependencies.fetchImpl || globalThis.fetch,
     headers: authHeaders(input.apiKey || ''),
+    apiKey: input.apiKey || '',
     signal: timeout.signal,
     warnings,
   };
   try {
     const discovered = await adapter(context);
-    const models = normalizeModels(discovered.models, providerType, discovered.modelSource === 'api' ? 'api' : 'static', warnings);
-    return {
+    const models = normalizeModels(
+      discovered.models,
+      providerType,
+      discovered.modelSource === 'api' ? 'api' : 'static',
+      warnings,
+      context.apiKey,
+    );
+    return redactExactSecret({
       validation: discovered.validation || { status: 'valid', message: 'Credentials and discovery endpoint were accepted.' },
       compatibility: preset.compatibility,
       models,
       modelSource: discovered.modelSource,
       warnings,
-    };
+    }, context.apiKey);
   } catch (error) {
-    return {
+    return redactExactSecret({
       validation: mapDiscoveryError(error),
       compatibility: preset.compatibility,
       models: [],
       modelSource: 'manual',
       warnings,
-    };
+    }, context.apiKey);
   } finally {
     timeout.done();
   }
