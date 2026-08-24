@@ -10,6 +10,14 @@
 
 详细设计见 [DESIGN.md](DESIGN.md)。
 
+## 效果
+
+Codex 的模型选择器里,**官方订阅模型**(ChatGPT 订阅)与**自有供应商模型**(阿里云百炼等)同列展示,随手切换:
+
+![Codex 模型选择器:ChatGPT 订阅模型与阿里云百炼模型同列,一屏切换](assets/screenshot-model-picker.png)
+
+选中哪个模型,codex-switch 就把该请求原样路由到对应上游——官方模型走 Codex OAuth 透传,自有模型注入 Bearer 认证;除认证头外,请求/响应一律字节级不改写。
+
 ## 安装
 
 两种方式,任选其一。
