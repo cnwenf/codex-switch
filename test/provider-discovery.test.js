@@ -618,6 +618,32 @@ test('benign encoded pagination components continue to the next page', async () 
   assert.equal(result.validation.status, 'valid');
 });
 
+test('encoded percent literals in pagination query and fragment remain usable', async (t) => {
+  for (const [name, next] of [
+    ['single-encoded query percent', 'https://gateway.example.test/v1/models?cursor=100%25done'],
+    ['nested query percent', 'https://gateway.example.test/v1/models?cursor=percent%2525encoded'],
+    ['single-encoded fragment percent', 'https://gateway.example.test/v1/models#one%25two'],
+  ]) {
+    await t.test(name, async () => {
+      const calls = [];
+      const result = await discoverProvider({
+        providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey: 'fixture-key',
+      }, {
+        fetchImpl: async (url) => {
+          calls.push(String(url));
+          if (calls.length === 1) {
+            return response(200, { data: [{ id: 'first-page-model' }], next });
+          }
+          return response(200, { data: [{ id: 'second-page-model' }] });
+        },
+      });
+      assert.equal(calls.length, 2);
+      assert.deepEqual(result.models.map((model) => model.id), ['first-page-model', 'second-page-model']);
+      assert.equal(result.validation.status, 'valid');
+    });
+  }
+});
+
 test('nested encoding is rejected for initial and last-id-derived URLs by the shared predicate', async () => {
   const apiKey = 'fixture/shared/url-key';
   let initialCalls = 0;
@@ -649,6 +675,24 @@ test('nested encoding is rejected for initial and last-id-derived URLs by the sh
   });
   assert.equal(paginationCalls, 1);
   assert.equal(paginationResult.validation.status, 'unreachable');
+});
+
+test('malformed percent encoding in last_id fails closed before the next fetch', async () => {
+  let calls = 0;
+  const result = await discoverProvider({
+    providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey: 'fixture-key',
+  }, {
+    fetchImpl: async () => {
+      calls += 1;
+      return response(200, {
+        data: [{ id: 'first-page-model' }],
+        has_more: true,
+        last_id: 'cursor%ZZ',
+      });
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.validation.status, 'unreachable');
 });
 
 test('malformed percent encoding is rejected before fetch instead of bypassing URL inspection', async () => {

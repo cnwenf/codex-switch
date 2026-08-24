@@ -7,6 +7,8 @@ const MAX_PAGES = 5;
 const MAX_MODELS = 2_000;
 const MAX_REDIRECTS = 3;
 const MAX_URL_DECODE_DEPTH = 3;
+const VALID_PERCENT_ESCAPE = /%[0-9a-f]{2}/i;
+const MALFORMED_PERCENT_ESCAPE = /%(?![0-9a-f]{2})/i;
 
 const INPUT_MODALITIES = Object.freeze(['text', 'image', 'audio', 'video', 'file']);
 const OUTPUT_MODALITIES = Object.freeze(['text', 'image', 'audio', 'video']);
@@ -203,11 +205,14 @@ function containsSecretInStringFields(value, apiKey, seen = new Set()) {
   return fields.some((field) => containsSecretInStringFields(field, apiKey, seen));
 }
 
-function urlComponentIsUnsafe(value, apiKey) {
+function urlComponentIsUnsafe(value, apiKey, alreadyDecoded = false) {
   let current = String(value);
-  if (current.includes(apiKey)) return true;
+  const hasApiKey = typeof apiKey === 'string' && apiKey.length > 0;
+  if (hasApiKey && current.includes(apiKey)) return true;
+  if (!alreadyDecoded && MALFORMED_PERCENT_ESCAPE.test(current)) return true;
 
   for (let depth = 0; depth < MAX_URL_DECODE_DEPTH; depth += 1) {
+    if (!VALID_PERCENT_ESCAPE.test(current)) return false;
     let decoded;
     try {
       decoded = decodeURIComponent(current);
@@ -216,11 +221,12 @@ function urlComponentIsUnsafe(value, apiKey) {
     }
     if (decoded === current) return false;
     current = decoded;
-    if (current.includes(apiKey)) return true;
+    if (hasApiKey && current.includes(apiKey)) return true;
   }
 
   // The depth bound permits three decoding transformations. Probe once more
   // without accepting the result so deeper encodings fail closed.
+  if (!VALID_PERCENT_ESCAPE.test(current)) return false;
   try {
     return decodeURIComponent(current) !== current;
   } catch {
@@ -229,15 +235,22 @@ function urlComponentIsUnsafe(value, apiKey) {
 }
 
 function urlContainsExactSecret(url, apiKey) {
-  if (typeof apiKey !== 'string' || apiKey.length === 0) return false;
-  if (url.href.includes(apiKey)) return true;
+  if (typeof apiKey === 'string' && apiKey.length > 0 && url.href.includes(apiKey)) return true;
 
   if (url.pathname.split('/').some((segment) => urlComponentIsUnsafe(segment, apiKey))) return true;
+
+  const rawQuery = url.search.slice(1);
+  for (const field of rawQuery ? rawQuery.split('&') : []) {
+    const separator = field.indexOf('=');
+    const name = separator === -1 ? field : field.slice(0, separator);
+    const value = separator === -1 ? '' : field.slice(separator + 1);
+    if (urlComponentIsUnsafe(name, apiKey) || urlComponentIsUnsafe(value, apiKey)) return true;
+  }
 
   for (const [name, value] of url.searchParams) {
     // URLSearchParams performs the first decode; continue canonicalizing each
     // name and value independently so nested encodings cannot hide the key.
-    if (urlComponentIsUnsafe(name, apiKey) || urlComponentIsUnsafe(value, apiKey)) return true;
+    if (urlComponentIsUnsafe(name, apiKey, true) || urlComponentIsUnsafe(value, apiKey, true)) return true;
   }
 
   return urlComponentIsUnsafe(url.hash.slice(1), apiKey);
@@ -569,7 +582,7 @@ function nextPageUrl(body, currentUrl, apiKey) {
     return resolved.toString();
   }
   if (body?.has_more && typeof body?.last_id === 'string' && body.last_id) {
-    if (containsSecretInStringFields(body.last_id, apiKey)) throw new DiscoverySafetyError('unsafe_pagination');
+    if (urlComponentIsUnsafe(body.last_id, apiKey)) throw new DiscoverySafetyError('unsafe_pagination');
     const url = new URL(currentUrl);
     url.searchParams.set('after', body.last_id);
     if (urlContainsExactSecret(url, apiKey)) throw new DiscoverySafetyError('unsafe_pagination');
