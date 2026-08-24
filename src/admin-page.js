@@ -23,6 +23,13 @@ export function getProviderSaveProblem(state) {
   if (!state.routable || state.compatibility === 'unsupported') {
     return '该厂商没有可直连的 Responses API，不能保存为路由。';
   }
+  if (state.modelSource === 'manual') {
+    const selected = new Set(Array.isArray(state.modelIds) ? state.modelIds : []);
+    const manualIds = Array.isArray(state.manualModelIds) ? state.manualModelIds : [];
+    if (!manualIds.some((id) => selected.has(id))) {
+      return '发现结果仅供参考，请手动输入可路由的 Endpoint / Deployment ID。';
+    }
+  }
   if (!Array.isArray(state.modelIds) || state.modelIds.length === 0) {
     return '至少选择或手动添加一个可路由模型。';
   }
@@ -110,8 +117,28 @@ export function shouldCloseModalOnEscape(state) {
     && !state.modelOpen;
 }
 
+export function shouldConsumeComboboxEscape(key, popupOpen) {
+  return key === 'Escape' && Boolean(popupOpen);
+}
+
+export function clearSensitiveModalFields(apiKeyInput, importInput) {
+  if (apiKeyInput) apiKeyInput.value = '';
+  if (importInput) importInput.value = '';
+}
+
+export function markDiscoveredModels(models, modelSource) {
+  const referenceOnly = modelSource === 'manual';
+  return (Array.isArray(models) ? models : []).map((model) => ({ ...model, referenceOnly }));
+}
+
+export function resolveDiscoveryModelSource(modelSource, manualOnlyProvider) {
+  return ['api', 'static', 'manual'].includes(modelSource)
+    ? modelSource
+    : (manualOnlyProvider ? 'manual' : 'unknown');
+}
+
 export function isModelToggleAllowed(model, isSelected) {
-  return Boolean(isSelected) || !model || model.responses !== false;
+  return Boolean(isSelected) || !model || (!model.referenceOnly && model.responses !== false);
 }
 
 export function renderAdminPage({ host, port, version }) {
@@ -125,7 +152,7 @@ export function renderAdminPage({ host, port, version }) {
 :root{
   --bg:#0a0c10; --bg2:#0e1117; --panel:#12161f; --panel2:#171c28;
   --border:#232a38; --border2:#2f3950;
-  --text:#e8ebf2; --muted:#8a93a6; --faint:#5d6678;
+  --text:#e8ebf2; --muted:#8a93a6; --faint:#7d879b; --decorative:#5d6678;
   --accent:#6d8dff; --accent2:#93aaff;
   --ok:#3ddc97; --warn:#ffc861; --err:#ff6b7a;
   --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;
@@ -162,7 +189,7 @@ body{margin:0;color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,'
 .chips{display:flex;gap:.45rem;align-items:center}
 .chip{font:11.5px/1.6 var(--mono);color:var(--muted);border:1px solid var(--border);background:var(--panel);
   padding:.18rem .6rem;border-radius:999px;white-space:nowrap}
-.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--faint);margin-right:.4rem;vertical-align:1px}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--decorative);margin-right:.4rem;vertical-align:1px}
 .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
 
 main{max-width:1080px;margin:1.5rem auto 2.5rem;padding:0 1.25rem}
@@ -244,7 +271,7 @@ tbody tr:last-child td{border-bottom:none}
 details{border:1px solid var(--border);border-radius:10px;padding:.55rem .95rem;margin-top:.65rem;background:var(--bg2)}
 summary{cursor:pointer;font-size:.82rem;color:var(--muted);user-select:none;list-style:none;display:flex;align-items:center;gap:.5rem}
 summary::-webkit-details-marker{display:none}
-summary:before{content:'▸';color:var(--faint);transition:transform .15s;flex:none}
+summary:before{content:'▸';color:var(--decorative);transition:transform .15s;flex:none}
 details[open] summary:before{transform:rotate(90deg)}
 .advdet{margin:.2rem 0 .5rem}
 .advdet summary{font-size:.76rem}
@@ -423,7 +450,7 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
         <label for="providerSearch">1 · 选择厂商</label>
         <div class="combo">
           <input id="providerSearch" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="providerListbox" aria-activedescendant="" autocomplete="off" placeholder="搜索 OpenAI、百炼、Kimi、Custom…">
-          <div id="providerListbox" role="listbox" aria-label="厂商列表" hidden></div>
+          <div id="providerListbox" class="listbox" role="listbox" aria-label="厂商列表" hidden></div>
         </div>
       </div>
       <div class="frow form-span">
@@ -502,6 +529,10 @@ ${nextOptionIndex.toString()}
 ${combineCapability.toString()}
 ${discoveryStatusCopy.toString()}
 ${shouldCloseModalOnEscape.toString()}
+${shouldConsumeComboboxEscape.toString()}
+${clearSensitiveModalFields.toString()}
+${markDiscoveredModels.toString()}
+${resolveDiscoveryModelSource.toString()}
 ${isModelToggleAllowed.toString()}
 var CURRENT={providers:[],union:{providers:0,total:0,models:[]},envKeys:[],officialSync:{modelCount:0,sources:[]}};
 var EDITING=null;
@@ -511,6 +542,8 @@ var SEARCH_ORIGIN_PRESET=null;
 var PROVIDER_OPTIONS={};
 var DISCOVERED_MODELS=[];
 var SELECTED_MODELS=[];
+var DISCOVERY_MODEL_SOURCE='unknown';
+var MANUAL_MODEL_IDS=new Set();
 var VALIDATION_STATUS='unverified';
 var HAS_SAVED_KEY=false;
 var SAVED_PROVIDER_TYPE='';
@@ -522,6 +555,7 @@ var DISCOVERY_CONTROLLER=null;
 var DISCOVERY_SEQUENCE=0;
 var PREVIOUS_FOCUS=null;
 var STATIC_UNVERIFIED={'volcengine-ark':1,'azure-openai':1,'cloudflare-workers-ai':1};
+var MANUAL_DISCOVERY={'volcengine-ark':1,'azure-openai':1};
 function $(id){return document.getElementById(id);}
 var PRETTY_ACR={gpt:1,api:1,llm:1,url:1,ws:1};
 function prettyName(s){return String(s==null?'':s).split('-').map(function(w){if(!w)return w;if(PRETTY_ACR[w.toLowerCase()])return w.toUpperCase();return w.charAt(0).toUpperCase()+w.slice(1);}).join(' ');}
@@ -879,6 +913,7 @@ function selectPreset(preset,existing,userDriven){
     HAS_SAVED_KEY=false;
     resetApiKeyFields(false);
     SELECTED_MODELS=[];DISCOVERED_MODELS=[];
+    MANUAL_MODEL_IDS.clear();
   }else if(existing){
     $('f-name').value=existing.name||preset.name;
     $('f-auth').value=existing.auth||preset.auth||'bearer';
@@ -949,6 +984,7 @@ function abortDiscovery(){
 function invalidateDiscovery(keepSelected,message){
   abortDiscovery();
   DISCOVERED_MODELS=[];
+  DISCOVERY_MODEL_SOURCE=resolveDiscoveryModelSource(undefined,SELECTED_PRESET&&MANUAL_DISCOVERY[SELECTED_PRESET.id]);
   if(keepSelected)SELECTED_MODELS=mergeSelectedModels(SELECTED_MODELS.map(function(model){return model.id;}),[]);
   else SELECTED_MODELS=[];
   MODEL_ACTIVE=-1;
@@ -1011,7 +1047,9 @@ function requestDiscovery(){
   }).then(function(result){
     if(sequence!==DISCOVERY_SEQUENCE||controller.signal.aborted)return;
     var validation=result.validation||{status:'unverified',message:'未返回验证状态。'};
-    DISCOVERED_MODELS=Array.isArray(result.models)?result.models:[];
+    DISCOVERY_MODEL_SOURCE=resolveDiscoveryModelSource(result.modelSource,SELECTED_PRESET&&MANUAL_DISCOVERY[SELECTED_PRESET.id]);
+    DISCOVERED_MODELS=markDiscoveredModels(result.models,DISCOVERY_MODEL_SOURCE);
+    DISCOVERED_MODELS.forEach(function(model){if(model.referenceOnly)MANUAL_MODEL_IDS.delete(model.id);});
     SELECTED_MODELS=mergeSelectedModels(SELECTED_MODELS.map(function(model){return model.id;}),DISCOVERED_MODELS);
     MODEL_ACTIVE=-1;
     var warnings=Array.isArray(result.warnings)&&result.warnings.length?' '+result.warnings.join(' '):'';
@@ -1026,6 +1064,7 @@ function requestDiscovery(){
     if(error&&error.name==='AbortError')return;
     if(sequence!==DISCOVERY_SEQUENCE)return;
     DISCOVERED_MODELS=[];
+    DISCOVERY_MODEL_SOURCE=resolveDiscoveryModelSource(undefined,SELECTED_PRESET&&MANUAL_DISCOVERY[SELECTED_PRESET.id]);
     SELECTED_MODELS=mergeSelectedModels(SELECTED_MODELS.map(function(model){return model.id;}),[]);
     setDiscoveryStatus('unreachable','检测请求失败；可重试，已选手动模型仍保留。');
     renderSelectedModels();
@@ -1068,7 +1107,7 @@ function appendContextCapability(container,value){
   container.appendChild(element('span','cap '+(known?'true':'unknown'),label));
 }
 function appendSourceCapability(container,source){
-  var names={api:'API',static:'静态',unknown:'未知',manual:'手动'};
+  var names={api:'API',static:'静态',unknown:'未知',manual:'手动',reference:'参考'};
   container.appendChild(element('span','cap source','来源 '+(names[source]||'未知')));
 }
 function renderModelCapabilities(container,model){
@@ -1079,7 +1118,7 @@ function renderModelCapabilities(container,model){
   appendCapability(container,'Reasoning',model.reasoning);
   appendCapability(container,'Tools',model.tools);
   appendCapability(container,'Responses',model.responses);
-  appendSourceCapability(container,model.source);
+  appendSourceCapability(container,model.referenceOnly?'reference':model.source);
 }
 function renderSelectedModels(){
   var container=$('selectedModels');
@@ -1130,12 +1169,18 @@ function renderModelList(){
     main.appendChild(element('span','list-option-name',model.name||model.id));
     main.appendChild(element('span','list-option-id',model.id));
     var caps=element('div','model-caps');
+    if(model.referenceOnly)caps.appendChild(element('span','cap unknown','仅供参考 · 不可路由'));
     renderModelCapabilities(caps,model);
     main.appendChild(caps);
     option.appendChild(main);
     option.addEventListener('click',function(event){
       event.preventDefault();
-      if(!toggleAllowed){setMsg('该模型明确不支持 Responses，不能新增为 Codex 路由。',false);return;}
+      if(!toggleAllowed){
+        setMsg(model.referenceOnly
+          ?'这是底座参考模型，不能直接路由；请在下方手动输入 Endpoint / Deployment ID。'
+          :'该模型明确不支持 Responses，不能新增为 Codex 路由。',false);
+        return;
+      }
       toggleModel(model.id);
     });
     list.appendChild(option);
@@ -1147,7 +1192,9 @@ function toggleModel(id,force){
   var selected=isSelectedModel(id);
   var candidate=modelById(id)||{id:id,name:id,source:'manual'};
   if(!isModelToggleAllowed(candidate,selected)){
-    setMsg('该模型明确不支持 Responses，不能新增为 Codex 路由。',false);
+    setMsg(candidate.referenceOnly
+      ?'这是底座参考模型，不能直接路由；请在下方手动输入 Endpoint / Deployment ID。'
+      :'该模型明确不支持 Responses，不能新增为 Codex 路由。',false);
     return;
   }
   var shouldSelect=force===undefined?!selected:force;
@@ -1155,6 +1202,7 @@ function toggleModel(id,force){
     SELECTED_MODELS=SELECTED_MODELS.concat([candidate]);
   }else if(!shouldSelect&&selected){
     SELECTED_MODELS=SELECTED_MODELS.filter(function(model){return model.id!==id;});
+    MANUAL_MODEL_IDS.delete(id);
   }
   SELECTED_MODELS=mergeSelectedModels(SELECTED_MODELS.map(function(model){return model.id;}),DISCOVERED_MODELS);
   renderSelectedModels();
@@ -1165,7 +1213,11 @@ function addManualModel(){
   var id=input.value.trim();
   if(!id){setMsg('请输入模型或 Deployment ID。',false);input.focus();return;}
   if(id.length>512){setMsg('模型 ID 过长，请检查。',false);return;}
+  var reference=DISCOVERED_MODELS.find(function(model){return model.id===id&&model.referenceOnly;});
+  if(reference){setMsg('这是底座参考模型 ID，请输入控制台创建的 Endpoint / Deployment ID。',false);return;}
+  MANUAL_MODEL_IDS.add(id);
   toggleModel(id,true);
+  if(!isSelectedModel(id))MANUAL_MODEL_IDS.delete(id);
   input.value='';
   setMsg('已添加手动模型；发现刷新不会删除它。',true);
   $('modelSearch').focus();
@@ -1194,6 +1246,8 @@ function resetModalState(){
   PROVIDER_OPTIONS={};
   DISCOVERED_MODELS=[];
   SELECTED_MODELS=[];
+  DISCOVERY_MODEL_SOURCE='unknown';
+  MANUAL_MODEL_IDS.clear();
   VALIDATION_STATUS='unverified';
   HAS_SAVED_KEY=false;
   SAVED_PROVIDER_TYPE='';
@@ -1251,6 +1305,7 @@ function openEdit(id){
   $('f-enabled').checked=provider.enabled!==false;
   resetApiKeyFields(HAS_SAVED_KEY);
   SELECTED_MODELS=mergeSelectedModels(provider.models||[],[]);
+  MANUAL_MODEL_IDS=new Set(provider.models||[]);
   var preset=findPreset(provider.provider_type)||findPreset('custom');
   selectPreset(preset,provider,false);
   renderSelectedModels();
@@ -1259,7 +1314,7 @@ function openEdit(id){
 }
 function closeModal(){
   abortDiscovery();
-  $('f-apikey').value='';
+  clearSensitiveModalFields($('f-apikey'),$('f-import'));
   closeProviderList();
   $('modelListbox').hidden=true;
   $('modelSearch').setAttribute('aria-expanded','false');
@@ -1287,6 +1342,7 @@ function importJson(){
   if(EDITING===null)$('f-id').value=imported.id?String(imported.id):'';
   if(typeof imported.enabled==='boolean')$('f-enabled').checked=imported.enabled;
   SELECTED_MODELS=mergeSelectedModels(Array.isArray(imported.models)?imported.models:String(imported.models||'').split(/[\\n,]+/).filter(Boolean),[]);
+  MANUAL_MODEL_IDS=new Set(SELECTED_MODELS.map(function(model){return model.id;}));
   if(imported.api_key||imported.token)$('f-apikey').value=String(imported.api_key||imported.token);
   renderSelectedModels();
   renderModelList();
@@ -1319,6 +1375,8 @@ function saveProvider(){
     hasKey:!!enteredKey,
     hasSavedKey:HAS_SAVED_KEY&&!deleteKey,
     modelIds:modelIds,
+    modelSource:DISCOVERY_MODEL_SOURCE,
+    manualModelIds:Array.from(MANUAL_MODEL_IDS),
     validationStatus:VALIDATION_STATUS,
     allowUnverified:allowUnverifiedSave()
   });
@@ -1384,7 +1442,9 @@ $('providerSearch').addEventListener('keydown',function(event){
   else if(event.key==='Enter'){
     var options=$('providerListbox').querySelectorAll('[role="option"]');
     if(options[PROVIDER_ACTIVE]){event.preventDefault();options[PROVIDER_ACTIVE].click();}
-  }else if(event.key==='Escape'){event.preventDefault();closeProviderList();}
+  }else if(shouldConsumeComboboxEscape(event.key,!$('providerListbox').hidden)){
+    event.preventDefault();closeProviderList();
+  }
 });
 $('f-baseurl').addEventListener('input',function(){
   if(SELECTED_PRESET&&SELECTED_PRESET.id==='custom')updateBaseUrl(true);
@@ -1421,7 +1481,7 @@ $('modelSearch').addEventListener('keydown',function(event){
   else if(event.key==='Enter'||event.key===' '){
     var active=$('modelListbox').querySelector('.active');
     if(active){event.preventDefault();active.click();}
-  }else if(event.key==='Escape'){
+  }else if(shouldConsumeComboboxEscape(event.key,!$('modelListbox').hidden)){
     event.preventDefault();
     $('modelListbox').hidden=true;
     $('modelSearch').setAttribute('aria-expanded','false');
