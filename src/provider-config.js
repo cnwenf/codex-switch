@@ -42,7 +42,7 @@ function inferProviderOptions(providerType, baseUrl) {
     return match ? { region: match[1] } : {};
   }
   if (providerType === 'bailian') {
-    const workspace = hostname.match(/^([a-z0-9_-]+)\.([a-z]{2}(?:-[a-z]+)+-\d+)\.maas\.aliyuncs\.com$/i);
+    const workspace = hostname.match(/^([a-z0-9_-]+)\.(cn-beijing|ap-southeast-1|us-east-1)\.maas\.aliyuncs\.com$/i);
     if (workspace) return { region: workspace[2], workspace_id: workspace[1] };
     const region = {
       'dashscope.aliyuncs.com': 'cn-beijing',

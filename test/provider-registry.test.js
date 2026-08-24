@@ -103,10 +103,13 @@ test('Bailian uses current regions and workspace hostnames', () => {
 });
 
 test('Bailian inference accepts only exact workspace and supported-region hosts', () => {
-  assert.equal(
-    inferProviderType('https://workspace123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1'),
-    'bailian',
-  );
+  for (const region of ['cn-beijing', 'ap-southeast-1', 'us-east-1']) {
+    assert.equal(
+      inferProviderType(`https://workspace123.${region}.maas.aliyuncs.com/compatible-mode/v1`),
+      'bailian',
+      region,
+    );
+  }
   assert.equal(
     inferProviderType('https://workspace123.eu-west-1.maas.aliyuncs.com/compatible-mode/v1'),
     'custom',
