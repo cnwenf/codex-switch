@@ -134,5 +134,7 @@ DMG="$DIST/CodexSwitch-$VERSION-macos-arm64.dmg"
 rm -f "$DMG"
 hdiutil create -volname "$APP_NAME $VERSION" -srcfolder "$DMG_ROOT" -fs HFS+ -format UDZO "$DMG" >/dev/null
 echo "[build] done: $DMG ($(du -h "$DMG" | awk '{print $1}'))"
+rm -rf "$STAGE" "$DMG_ROOT"
+echo "[build] 已清理中间产物:$STAGE、$DMG_ROOT"
 echo "[build] 首次打开提示:下载自网络的 App 带隔离属性,若 Gatekeeper 拦截,"
 echo "        右键「打开」或执行: xattr -cr \"/Applications/$APP_NAME.app\""

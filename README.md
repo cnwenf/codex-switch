@@ -36,8 +36,14 @@ curl -fsSL https://raw.githubusercontent.com/cnwenf/codex-switch/main/scripts/in
 **首次打开不会弹 Gatekeeper**:macOS 的隔离属性(`com.apple.quarantine`)只会由浏览器 / 邮件 /
 AirDrop 等「带隔离意识」的下载器打上,`curl` 下载不打。
 
-> 在 DNS 受限网络直连 GitHub 困难时,可先克隆本仓库再执行 `sh scripts/install-app.sh`;
-> 也可手动下载 DMG 后执行 `sh scripts/install-app.sh /path/to/xxx.dmg`(离线安装/指定版本)。
+> **DNS 受限 / 直连超时**时,改用固定 IP 版:
+>
+> ```sh
+> curl -fsSL --resolve raw.githubusercontent.com:443:185.199.108.133 https://raw.githubusercontent.com/cnwenf/codex-switch/main/scripts/install-app.sh | sh
+> ```
+>
+> 也可先克隆本仓库再执行 `sh scripts/install-app.sh`,或手动下载 DMG 后执行
+> `sh scripts/install-app.sh /path/to/xxx.dmg`(离线安装/指定版本)。
 
 #### B)手动 DMG 安装
 

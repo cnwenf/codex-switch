@@ -41,7 +41,9 @@ trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 case "$SRC" in
   http://*|https://*)
     say "下载 DMG(curl,不附带隔离属性)…"
-    curl -fL --retry 3 --max-time 600 --progress-bar -o "$DMG" "$SRC" \
+    curl -fL --retry 2 --max-time 600 --progress-bar -o "$DMG" "$SRC" \
+      || { say "直连失败,改用固定 IP 重试(DNS 受限网络)…";
+           curl -fL --retry 2 --max-time 600 --progress-bar --resolve github.com:443:140.82.112.3 -o "$DMG" "$SRC"; } \
       || die "下载失败。若在受限网络,可先手动下载,再:sh scripts/install-app.sh /path/to/xxx.dmg"
     ;;
   *)
