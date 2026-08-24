@@ -799,64 +799,79 @@ Providers without keys remain “stub-tested + official docs verified,” not li
 
 For any defect, write a failing regression test, verify RED, implement the minimal fix, verify GREEN, repeat the affected browser scenario, and commit with a scoped `fix:` message.
 
-### Task 9: DMG Build, Install Smoke Test, Push, and GitHub Release
+### Task 9: GitHub Actions Release DMG Automation and Installer Readiness
 
 **Files:**
-- Generated: `dist/CodexSwitch-0.5.0-macos-arm64.dmg`
-- Generated: `dist/CodexSwitch-0.5.0-macos-arm64.dmg.sha256`
+- Create: `.github/workflows/release-dmg.yml`
+- Modify: `scripts/install-app.sh`
+- Create: `test/install-app.test.js`
+- Modify: `README.md`
 
 **Interfaces:**
-- Consumes: clean v0.5.0 source tree and release credentials.
-- Produces: pushed `main`, tag `v0.5.0`, and a public GitHub Release with verified DMG and checksum assets.
+- Consumes: a published GitHub Release whose tag points at the versioned source tree.
+- Produces: an automatically built `CodexSwitch-<version>-macos-arm64.dmg`, matching `.sha256`, and an installer that handles the asynchronous release-asset window.
 
-- [ ] **Step 1: Run final pre-build verification**
+- [ ] **Step 1: Write failing workflow and installer contract tests**
 
-Run:
+Assert that the workflow:
 
-```bash
-npm ci --ignore-scripts
-npm test
-git diff --check
-git status --short
-```
+- triggers from `release.published` and is also manually dispatchable for recovery;
+- checks out the release tag/target, uses a pinned macOS runner and Node 20, installs with `npm ci`, runs the full test suite, builds the app, verifies the DMG, writes SHA256, and uploads both assets to the exact release tag;
+- has least-privilege `contents: write`, per-tag concurrency, bounded timeouts, and no long-lived release token beyond `GITHUB_TOKEN`.
 
-Expected: tests pass and the worktree is clean.
+Test the install script against fixture release JSON/API responses for: asset already present, release present but asset pending for several polls, asset eventually available, bounded timeout with an actionable message, checksum verification, explicit URL, and local-file installation paths.
 
-- [ ] **Step 2: Build and verify the DMG**
+- [ ] **Step 2: Implement the release workflow**
 
-Run:
+Create `.github/workflows/release-dmg.yml` on `macos-14` with `release: [published]` and `workflow_dispatch` inputs for a release tag. Resolve the exact tag, check out that ref, verify package version matches it, run tests, call `scripts/build-macos-app.sh`, run `hdiutil verify`, generate the checksum file, then upload both files to the existing release with `gh release upload --clobber`.
 
-```bash
-sh scripts/build-macos-app.sh
-codesign --verify --deep --strict --verbose=2 "dist/staging/Codex Switch.app" 2>/dev/null || true
-shasum -a 256 dist/CodexSwitch-0.5.0-macos-arm64.dmg > dist/CodexSwitch-0.5.0-macos-arm64.dmg.sha256
-hdiutil verify dist/CodexSwitch-0.5.0-macos-arm64.dmg
-```
+The workflow must fail rather than uploading an asset when version/tag, tests, signature, DMG verification, or checksum generation fails.
 
-Because the build script removes staging after signing, verify the mounted app signature in the next step even if the staging path is absent.
+- [ ] **Step 3: Adapt the one-click installer to delayed assets**
 
-- [ ] **Step 3: Mount and smoke-test the bundled app**
+When no explicit source is passed, query the latest published release and bind to its tag. If that release has no matching arm64 DMG yet, poll the same release by tag with bounded exponential/backoff intervals and clear progress text. Never silently fall back to an older release. On timeout, explain that GitHub Actions may still be building and provide the release URL plus a rerun command.
 
-Mount the DMG with `hdiutil attach -nobrowse -readonly`, run `codesign --verify --deep --strict` against the mounted app, inspect its bundled `package.json` and `config.toml`, launch it on an unused test configuration if necessary, verify the health endpoint and management page, then detach the explicit mount point.
+When a checksum asset is present, download and verify it before mounting. Preserve explicit remote URL and local DMG behavior without requiring the GitHub API.
 
-- [ ] **Step 4: Verify repository and release authentication**
+- [ ] **Step 4: Verify locally and lint the workflow**
 
-Run: `git push --dry-run origin main` and `gh auth status`.
+Run installer fixture tests, the complete repository suite, shell syntax checks, YAML parsing/actionlint when available, `git diff --check`, and a credential-pattern scan. Build a local DMG once only as a preflight of the same build script, not as the release upload source.
 
-If CLI auth remains unavailable, use the already signed-in GitHub browser only after the user confirms any sensitive login/token interaction. Do not expose credentials in commands, URLs, logs, or chat.
-
-- [ ] **Step 5: Push commits and create the release**
+- [ ] **Step 5: Commit**
 
 ```bash
-git push origin main
-git tag -a v0.5.0 -m "codex-switch v0.5.0"
-git push origin v0.5.0
-gh release create v0.5.0 \
-  dist/CodexSwitch-0.5.0-macos-arm64.dmg \
-  dist/CodexSwitch-0.5.0-macos-arm64.dmg.sha256 \
-  --title "codex-switch v0.5.0" \
-  --notes-file /tmp/codex-switch-v0.5.0-release-notes.md
+git add .github/workflows/release-dmg.yml scripts/install-app.sh test/install-app.test.js README.md
+git commit -m "ci: build release DMGs on GitHub Actions"
 ```
+
+### Task 10: Push, Publish Release, and Verify Automated Assets
+
+**Files:**
+- No repository files unless release verification reveals a defect.
+
+**Interfaces:**
+- Consumes: clean v0.5.0 source tree, repository/release authorization, and the Task 9 workflow.
+- Produces: pushed `main`, tag `v0.5.0`, public GitHub Release, successful Actions run, verified DMG/SHA256 assets, and a successful one-click installer smoke test.
+
+- [ ] **Step 1: Run final verification and a local packaging preflight**
+
+Run `npm ci --ignore-scripts`, the full suite, syntax/diff/security scans, local DMG build, `hdiutil verify`, and a mounted-app signature/health smoke test. The local artifact is evidence only and is never uploaded manually.
+
+- [ ] **Step 2: Verify repository and release authorization**
+
+Run `git push --dry-run origin main` and `gh auth status`. If CLI auth remains unavailable, use an already signed-in browser only after the required sensitive login/token confirmation. Do not expose credentials in commands, URLs, logs, or chat.
+
+- [ ] **Step 3: Push the source and publish the release**
+
+Push the reviewed branch to `main`, create and push annotated tag `v0.5.0`, then create the Release with notes but without local binary assets. The published event must trigger the release workflow.
+
+- [ ] **Step 4: Wait for and inspect GitHub Actions**
+
+Follow the exact workflow run to completion. If it fails, inspect logs, fix the root cause with a regression test where applicable, push the fix under a new release/tag decision that preserves immutable published artifacts, and rerun within the workflow's recovery contract.
+
+- [ ] **Step 5: Verify release assets and installer**
+
+Download the workflow-produced DMG and checksum, verify SHA256 and `hdiutil`, mount and inspect the bundled version/default config/signature, then run the one-click installer against the published release. Confirm the installer's pending-asset path with fixtures and its normal latest-release path against GitHub.
 
 Release notes must summarize provider discovery, truthful Responses compatibility, searchable models/capabilities, no default Bailian, security behavior, and verification evidence without mentioning or exposing keys.
 
