@@ -1237,6 +1237,11 @@ footer{max-width:1080px;margin:0 auto;padding:0 1.25rem 2.6rem;color:var(--faint
 <div id="modalWrap" style="display:none">
   <div id="modal">
     <div class="modal-head"><b id="modalTitle">添加供应商</b><button class="xbtn" onclick="closeModal()">✕</button></div>
+    <details class="advdet" id="importWrap"><summary>从 JSON 导入(粘贴其他机器「复制」得到的配置)</summary>
+      <div class="frow"><textarea id="f-import" rows="5" class="mono" placeholder="粘贴从其他机器「复制」得到的供应商 JSON(可含 api_key)" spellcheck="false"></textarea>
+      <div class="fhint">导入只是填充表单、不会直接落盘,仍需点「保存」。含 api_key 的 JSON 请妥善保管、勿外传。</div>
+      <button class="btn small" onclick="importJson()">解析并填充表单</button></div>
+    </details>
     <div class="frow"><label>名称</label><input id="f-name" placeholder="例如 阿里云百炼"></div>
     <div class="frow"><label>URL</label><input id="f-baseurl" class="mono" placeholder="https://…" spellcheck="false"></div>
     <div class="frow" id="f-apikey-wrap"><label>API Key</label>
@@ -1360,10 +1365,25 @@ function cardHtml(p){
     +'<div class="pcard-row"><span class="lbl">模型</span></div>'
     +'<div class="pcard-models">'+models+'</div>'
     +'<div class="pcard-actions">'
+      +'<button class="btn small" data-act="copy" data-id="'+escH(p.id)+'" title="复制为 JSON(含 API Key,勿外传)">复制</button>'
       +'<button class="btn small" data-act="edit" data-id="'+escH(p.id)+'">编辑</button>'
       +'<button class="btn small danger" data-act="del" data-id="'+escH(p.id)+'">删除</button>'
     +'</div>'
   +'</div>';
+}
+function copyText(s,doneMsg){
+  function ok(){toast(doneMsg||'已复制到剪贴板');}
+  function fb(){var ta=document.createElement('textarea');ta.value=s;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();var good=false;try{good=document.execCommand('copy');}catch(e){}document.body.removeChild(ta);if(good){ok();}else{toast('复制失败,请手动复制',false);}}
+  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(s).then(ok,fb);}else{fb();}
+}
+function copyProvider(id){
+  api('/__admin/providers/export?id='+encodeURIComponent(id)).then(function(j){
+    if(j.ok===false||!j.provider){toast('导出失败: '+(j.error||'unknown error'),false);return;}
+    var p=j.provider;
+    var o={id:p.id,name:p.name,auth:p.auth,base_url:p.base_url,token_env:p.token_env,models:p.models||[],enabled:p.enabled!==false};
+    if(p.api_key)o.api_key=p.api_key;
+    copyText(JSON.stringify(o,null,2),'已复制 '+id+' 配置 JSON'+(p.api_key?'(含 API Key,勿外传)':''));
+  }).catch(function(e){toast('导出失败: '+e.message,false);});
 }
 function toggleP(id,on){
   api('/__admin/providers/toggle',{id:id,enabled:on}).then(function(){
@@ -1400,6 +1420,7 @@ function openAdd(){
   $('f-id').value='';$('f-id').readOnly=false;
   $('f-name').value='';$('f-auth').value='bearer';$('f-baseurl').value='';
   $('f-tokenenv').value='';$('f-models').value='';$('f-enabled').checked=true;
+  $('f-import').value='';
   resetApiKeyFields(false);
   setMsg('');authChanged();
   $('modalWrap').style.display='flex';
@@ -1418,12 +1439,31 @@ function openEdit(id){
   $('f-tokenenv').value=p.token_env||'';
   $('f-models').value=(p.models||[]).join('\\n');
   $('f-enabled').checked=p.enabled!==false;
+  $('f-import').value='';
   resetApiKeyFields(envKeyConfigured(p.token_env));
   setMsg('');authChanged();
   $('modalWrap').style.display='flex';
   $('f-name').focus();
 }
 function closeModal(){$('modalWrap').style.display='none';}
+function importJson(){
+  var raw=$('f-import').value.trim();
+  if(!raw){setMsg('请先粘贴 JSON 内容',false);return;}
+  var o;
+  try{o=JSON.parse(raw);}catch(e){setMsg('JSON 解析失败: '+e.message,false);return;}
+  if(!o||typeof o!=='object'||Array.isArray(o)){setMsg('JSON 顶层必须是对象(供应商配置)',false);return;}
+  if(!o.name&&!o.base_url&&!o.id){setMsg('无法识别:JSON 中至少要有 name / base_url / id 之一',false);return;}
+  if(EDITING===null)$('f-id').value=o.id?String(o.id):'';
+  $('f-name').value=o.name?String(o.name):'';
+  if(o.auth)$('f-auth').value=String(o.auth);
+  $('f-baseurl').value=o.base_url?String(o.base_url):'';
+  $('f-tokenenv').value=o.token_env?String(o.token_env):'';
+  if(o.models!=null){$('f-models').value=Array.isArray(o.models)?o.models.join('\\n'):String(o.models).replace(/,/g,'\\n');}
+  if(typeof o.enabled==='boolean')$('f-enabled').checked=o.enabled;
+  if(o.api_key||o.token)$('f-apikey').value=String(o.api_key||o.token);
+  authChanged();
+  setMsg('已填充表单,请检查后点「保存」 ✓',true);
+}
 function saveProvider(){
   var name=$('f-name').value.trim();
   var id=$('f-id').value.trim()||autoId(name);   // ID 留空 = 按名称自动生成
@@ -1475,6 +1515,7 @@ $('providerGrid').addEventListener('click',function(e){
   var t=e.target.closest?e.target.closest('[data-act]'):null;
   if(!t)return;
   var id=t.getAttribute('data-id');
+  if(t.getAttribute('data-act')==='copy')copyProvider(id);
   if(t.getAttribute('data-act')==='edit')openEdit(id);
   if(t.getAttribute('data-act')==='del')delP(id);
 });
@@ -1591,6 +1632,18 @@ async function handleAdmin(req, bodyBuf, res) {
   // ---------- providers CRUD ----------
   if (p.startsWith('/__admin/providers')) {
     try {
+      if (req.method === 'GET' && p === '/__admin/providers/export') {
+        const c = getConfig();
+        const id = String(url.searchParams.get('id') || '');
+        const prov = (c.providers || []).find((x) => x.id === id);
+        if (!prov) return sendJson(res, 404, { error: 'not found', id });
+        const out = { ...prov };
+        let apiKey = '';
+        if (prov.token_env) apiKey = readEnvFileEntries().get(prov.token_env) || process.env[prov.token_env] || '';
+        else if (prov.token) apiKey = prov.token; // 旧版内联 token:导出以便迁移到 env
+        delete out.token; // 常规字段永不带明文;api_key 仅此显式导出端点返回
+        return sendJson(res, 200, { ok: true, provider: { ...out, api_key: apiKey } });
+      }
       if (req.method === 'GET' && p === '/__admin/providers') {
         const c = getConfig();
         const providers = (c.providers || []).map((x) => {
