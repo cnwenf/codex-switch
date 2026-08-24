@@ -4,7 +4,8 @@
 // 职责(只读监视 + 快捷入口,不管理服务进程):
 //  - 状态栏小图标:服务可达=正常,不可达=图标变暗;
 //  - 每 5s 轮询 /__admin/health,菜单里显示 版本·供应商数·模型数·运行时长;
-//  - 菜单:打开配置页 / 检查更新(发现新版可一键触发 /__admin/update/run)/ 隐藏图标;
+//  - 菜单:打开配置页 / 检查更新(发现新版可一键触发 /__admin/update/run)/ 隐藏图标 / 退出;
+//  - 「退出」= 向父进程(启动器)发 SIGTERM,由其先还原注入的 Codex 配置再停服务;
 //  - 父进程(启动器)消失后自动退出,不留孤儿图标;
 //  - 无 Dock 图标、无窗口:activation policy = accessory。
 
@@ -59,9 +60,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     menu.addItem(updItem)
 
     menu.addItem(.separator())
-    let hideItem = NSMenuItem(title: "隐藏图标", action: #selector(hideIcon), keyEquivalent: "q")
+    let hideItem = NSMenuItem(title: "隐藏图标", action: #selector(hideIcon), keyEquivalent: "")
     hideItem.target = self
     menu.addItem(hideItem)
+
+    let quitItem = NSMenuItem(title: "退出 Codex Switch(自动还原配置)", action: #selector(quitApp), keyEquivalent: "q")
+    quitItem.target = self
+    menu.addItem(quitItem)
 
     statusItem.menu = menu
 
@@ -109,6 +114,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
   }
 
   @objc private func hideIcon() { NSApp.terminate(nil) }
+
+  // 退出:给父进程(启动器)发 SIGTERM —— 启动器的 trap 会先调 /__admin/codex-restore
+  // 把注入的 Codex 配置还原(最新备份覆盖回 ~/.codex/),再停掉服务与本菜单栏进程。
+  @objc private func quitApp() {
+    kill(getppid(), SIGTERM)
+    NSApp.terminate(nil)
+  }
 
   @objc private func checkUpdate() {
     guard let url = URL(string: baseURL + "/__admin/update/check") else { return }

@@ -79,10 +79,16 @@ PORT=$(sed -n 's/^listen *= *"[0-9.]*:\([0-9]*\)"/\1/p' "$CFG" 2>/dev/null | hea
 PORT="${PORT:-8787}"
 URL="http://127.0.0.1:$PORT/"
 mkdir -p "$HOME/.codex-switch"
-MB="$DIR/../Resources/CodexSwitchMenuBar"
+MB_SRC="$DIR/../Resources/CodexSwitchMenuBar"
+MB_BIN="$HOME/.codex-switch/CodexSwitchMenuBar"
 start_menubar() {
-  [ -x "$MB" ] || return 0
-  "$MB" --port "$PORT" >/dev/null 2>&1 &
+  # 先拷贝到用户目录再启动:菜单栏进程若从 .app 包内启动,其
+  # setActivationPolicy(.accessory) 会把整个 App 降级为 UIElement,
+  # 导致 Dock/⌘Tab 里看不到本应用。从包外启动则互不影响。
+  [ -x "$MB_SRC" ] || return 0
+  cp -f "$MB_SRC" "$MB_BIN" 2>/dev/null || return 0
+  chmod +x "$MB_BIN" 2>/dev/null || return 0
+  "$MB_BIN" --port "$PORT" >/dev/null 2>&1 &
   MB_PID=$!
 }
 if lsof -tnP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -93,7 +99,14 @@ fi
 "$NODE" "$APP/src/server.js" >> "$HOME/.codex-switch/run.log" 2>&1 &
 SERVER_PID=$!
 start_menubar
-trap 'kill $SERVER_PID 2>/dev/null; [ -n "${MB_PID:-}" ] && kill $MB_PID 2>/dev/null' TERM INT
+stop_all() {
+  # 退出前先还原官方 Codex 配置(撤销本应用注入的代理设置)
+  curl -fsS -m 8 -X POST "http://127.0.0.1:$PORT/__admin/codex-restore" >> "$HOME/.codex-switch/run.log" 2>&1 || true
+  kill $SERVER_PID 2>/dev/null
+  [ -n "${MB_PID:-}" ] && kill $MB_PID 2>/dev/null
+  exit 0
+}
+trap stop_all TERM INT
 i=0
 while [ $i -lt 20 ]; do
   if lsof -tnP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then break; fi

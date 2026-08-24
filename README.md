@@ -105,6 +105,9 @@ cd codex-switch
 - 停掉当前服务:`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.cnwenf.codex-switch.plist`;
 - 再次手动启动:直接打开「Codex Switch」App 即可;
 - 菜单栏小图标:App 运行时右上角图标常亮,服务未运行时变暗;点按可看状态、打开配置页、检查更新或隐藏图标(重启 App 会再次出现)。
+- 退出即还原:菜单栏菜单里的「退出 Codex Switch(自动还原配置)」或从 Dock / ⌘Tab 退出 App,
+  都会先把本应用注入的 Codex 代理配置自动还原回官方默认(再退出进程),Codex 随即直连官方;
+  需要代理时重新打开 App 即可(开机自启仍生效)。
 - 升级(三选一):① 配置页右上角版本旁点「**更新**」——自动下载新版 DMG、安装并重启,带下载进度条;
   ② 重跑一键安装脚本(自动取最新 Release);③ 下载新 DMG → 拖到「应用程序」覆盖 → 重新打开 App。
 
