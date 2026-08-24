@@ -24,16 +24,61 @@ function cssRule(html, selector) {
   return html.match(new RegExp(`${escaped}\\{([^}]*)\\}`))?.[1] || '';
 }
 
+function cssSource(html) {
+  return html.match(/<style>([\s\S]*?)<\/style>/)?.[1] || '';
+}
+
+function cssTokens(html) {
+  return Object.fromEntries(
+    [...cssRule(html, ':root').matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+)/gi)]
+      .map((match) => [match[1], match[2].trim()]),
+  );
+}
+
+function cssAtRule(html, marker) {
+  const css = cssSource(html);
+  const start = css.indexOf(marker);
+  if (start < 0) return '';
+  const open = css.indexOf('{', start);
+  if (open < 0) return '';
+  let depth = 1;
+  for (let index = open + 1; index < css.length; index += 1) {
+    if (css[index] === '{') depth += 1;
+    if (css[index] === '}') depth -= 1;
+    if (depth === 0) return css.slice(open + 1, index);
+  }
+  return '';
+}
+
+function cssPixels(value) {
+  const match = String(value).match(/^([0-9.]+)(px|rem)$/);
+  assert.ok(match, `expected a px/rem length, got ${value}`);
+  return Number(match[1]) * (match[2] === 'rem' ? 16 : 1);
+}
+
+function relativeLuminance(color) {
+  const match = String(color).match(/^oklch\(([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)(?:\s*\/\s*[0-9.]+)?\)$/i);
+  assert.ok(match, `expected an oklch color, got ${color}`);
+  const lightness = Number(match[1]);
+  const chroma = Number(match[2]);
+  const hue = Number(match[3]) * Math.PI / 180;
+  const a = chroma * Math.cos(hue);
+  const b = chroma * Math.sin(hue);
+  const lPrime = lightness + 0.3963377774 * a + 0.2158037573 * b;
+  const mPrime = lightness - 0.1055613458 * a - 0.0638541728 * b;
+  const sPrime = lightness - 0.0894841775 * a - 1.291485548 * b;
+  const l = lPrime ** 3;
+  const m = mPrime ** 3;
+  const s = sPrime ** 3;
+  const red = Math.min(1, Math.max(0, 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s));
+  const green = Math.min(1, Math.max(0, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s));
+  const blue = Math.min(1, Math.max(0, -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s));
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
 function contrastRatio(foreground, background) {
-  const luminance = (hex) => {
-    const channels = hex.slice(1).match(/../g).map((part) => Number.parseInt(part, 16) / 255);
-    const linear = channels.map((channel) => (
-      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
-    ));
-    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
-  };
-  const first = luminance(foreground);
-  const second = luminance(background);
+  const first = relativeLuminance(foreground);
+  const second = relativeLuminance(background);
   return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
 }
 
@@ -50,26 +95,135 @@ test('provider form exposes accessible searchable provider and multi-model combo
   assert.match(html, /id="manualModelId"/);
 });
 
-test('provider results render as a bounded scrolling overlay on narrow screens', () => {
+test('provider and model results use remaining-height scrolling inside the responsive sheet', () => {
   const html = render();
   assert.match(html, /id="providerListbox" class="listbox"[^>]*role="listbox"/);
   const rule = cssRule(html, '.listbox');
   assert.match(rule, /position:absolute/);
-  assert.match(rule, /max-height:280px/);
+  assert.match(rule, /max-height:min\([^;]*calc\(100dvh\s*-/);
   assert.match(rule, /overflow:auto/);
+
+  const mobile = cssAtRule(html, '@media(max-width:520px)');
+  assert.match(mobile, /\.listbox\{[^}]*position:relative/);
+  assert.match(mobile, /\.listbox\{[^}]*max-height:calc\(100dvh\s*-/);
 });
 
-test('small secondary text meets WCAG AA contrast on every page surface', () => {
+test('light semantic color tokens keep text, accent, and statuses at WCAG AA contrast', () => {
   const html = render();
-  const root = cssRule(html, ':root');
-  const faint = root.match(/--faint:(#[0-9a-f]{6})/i)?.[1];
-  assert.ok(faint, 'missing --faint token');
-  for (const background of ['#0a0c10', '#0e1117', '#12161f', '#171c28', '#0b0e14']) {
+  const tokens = cssTokens(html);
+  for (const token of [
+    '--color-canvas',
+    '--color-surface',
+    '--color-surface-muted',
+    '--color-text',
+    '--color-text-secondary',
+    '--color-accent',
+    '--color-success',
+    '--color-warning',
+    '--color-error',
+  ]) {
+    assert.match(tokens[token] || '', /^oklch\(/, `missing semantic OKLCH token ${token}`);
+  }
+  assert.ok(relativeLuminance(tokens['--color-canvas']) >= 0.82, 'canvas must be visibly light');
+  for (const foreground of [
+    '--color-text',
+    '--color-text-secondary',
+    '--color-accent',
+    '--color-success',
+    '--color-warning',
+    '--color-error',
+  ]) {
     assert.ok(
-      contrastRatio(faint, background) >= 4.5,
-      `${faint} must reach 4.5:1 on ${background}`,
+      contrastRatio(tokens[foreground], tokens['--color-surface']) >= 4.5,
+      `${foreground} must reach 4.5:1 on the primary surface`,
     );
   }
+});
+
+test('type, spacing, control, and radius tokens establish a readable product hierarchy', () => {
+  const html = render();
+  const tokens = cssTokens(html);
+  assert.ok(cssPixels(tokens['--font-size-title']) >= 22);
+  assert.ok(cssPixels(tokens['--font-size-section']) >= 16);
+  assert.ok(cssPixels(tokens['--font-size-body']) >= 14);
+  assert.ok(cssPixels(tokens['--font-size-metadata']) >= 12);
+  assert.ok(cssPixels(tokens['--font-size-title']) / cssPixels(tokens['--font-size-section']) >= 1.25);
+  assert.ok(cssPixels(tokens['--control-height']) >= 40);
+  assert.ok(cssPixels(tokens['--control-height-touch']) >= 44);
+  for (const token of ['--space-1', '--space-2', '--space-3', '--space-4', '--space-6', '--radius-sm', '--radius-md', '--radius-lg']) {
+    assert.ok(cssPixels(tokens[token]) > 0, `missing scale token ${token}`);
+  }
+  assert.match(cssRule(html, 'body'), /font:[^;]*var\(--font-size-body\)/);
+  assert.match(cssRule(html, '.note'), /font-size:var\(--font-size-body\)/);
+  assert.match(cssRule(html, '.note'), /max-width:72ch/);
+});
+
+test('provider management is a single record list with shrink-safe long values', () => {
+  const html = render();
+  assert.match(html, /<div class="provider-summary"[^>]*>\s*<div id="unionBar"[\s\S]*?<div id="unionChips"/);
+  assert.match(html, /id="providerGrid" class="provider-list" role="list"/);
+  assert.match(html, /element\('article','pcard/);
+  assert.match(cssRule(html, '.provider-list'), /display:flex/);
+  assert.match(cssRule(html, '.provider-list'), /flex-direction:column/);
+  assert.match(cssRule(html, '.pcard'), /min-width:0/);
+  assert.doesNotMatch(cssRule(html, '.pcard'), /border-radius/);
+  assert.match(cssRule(html, '.url,.cred,.warn-text'), /overflow-wrap:anywhere/);
+  assert.match(cssRule(html, 'main'), /max-width:var\(--content-width\)/);
+});
+
+test('narrow screens have zero-overflow structure, touch targets, and a full-height dialog sheet', () => {
+  const html = render();
+  const mobile = cssAtRule(html, '@media(max-width:520px)');
+  assert.match(mobile, /#modalWrap\{[^}]*padding:0/);
+  assert.match(mobile, /#modal\{[^}]*height:100dvh/);
+  assert.match(mobile, /#modal\{[^}]*max-height:100dvh/);
+  assert.match(mobile, /\.btn,\.tabbtn,\.xbtn,\.list-option\{[^}]*min-height:var\(--control-height-touch\)/);
+  assert.match(mobile, /\.switch\{[^}]*min-width:var\(--control-height-touch\)/);
+  assert.match(cssRule(html, '.modal-body'), /min-height:0/);
+  assert.match(cssRule(html, '.modal-body'), /overflow:auto/);
+  assert.match(cssRule(html, '.modal-head'), /flex:none/);
+  assert.match(cssRule(html, '.modal-foot'), /flex:none/);
+});
+
+test('tabs, panels, and import textarea expose complete programmatic semantics', () => {
+  const html = render();
+  assert.match(html, /<nav class="tabs" role="tablist" aria-label="管理页面">/);
+  assert.match(html, /id="tabbtn-providers"[^>]*role="tab"[^>]*aria-selected="true"[^>]*aria-controls="tab-providers"/);
+  assert.match(html, /id="tabbtn-history"[^>]*role="tab"[^>]*aria-selected="false"[^>]*aria-controls="tab-history"/);
+  assert.match(html, /id="tabbtn-providers"[^>]*tabindex="0"/);
+  assert.match(html, /id="tabbtn-history"[^>]*tabindex="-1"/);
+  assert.match(html, /id="tab-providers"[^>]*role="tabpanel"[^>]*aria-labelledby="tabbtn-providers"/);
+  assert.match(html, /id="tab-history"[^>]*role="tabpanel"[^>]*aria-labelledby="tabbtn-history"/);
+  assert.match(html, /<label for="f-import">配置 JSON<\/label>/);
+  assert.match(html, /btn\.setAttribute\('aria-selected',tabs\[i\]===name\?'true':'false'\)/);
+});
+
+test('rendered theme excludes decorative AI-console patterns and layout-property motion', () => {
+  const html = render();
+  const css = cssSource(html);
+  assert.doesNotMatch(css, /(?:linear|radial|conic)-gradient\(/i);
+  assert.doesNotMatch(css, /backdrop-filter/i);
+  assert.doesNotMatch(css, /::-webkit-scrollbar/i);
+  assert.doesNotMatch(css, /background-clip\s*:\s*text/i);
+  assert.doesNotMatch(html, /class="bar"/);
+  assert.doesNotMatch(css, /border-(?:left|right)\s*:\s*(?:[2-9]|[1-9][0-9])px/i);
+  assert.doesNotMatch(css, /transition\s*:[^;}]*(?:width|height|top|right|bottom|left|margin|padding)/i);
+  assert.match(cssRule(html, '.upd-fill'), /transform:scaleX\(0\)/);
+  assert.match(cssRule(html, '.upd-fill'), /transition:transform/);
+  assert.doesNotMatch(html, /fill\.style\.width/);
+  assert.match(html, /fill\.style\.transform='scaleX\('/);
+  assert.match(cssAtRule(html, '@media(prefers-reduced-motion:reduce)'), /transition:none!important/);
+});
+
+test('interactive controls define hover, focus, active, disabled, loading, and error states', () => {
+  const html = render();
+  assert.ok(cssRule(html, '.btn:hover'));
+  assert.ok(cssRule(html, '.btn:active'));
+  assert.ok(cssRule(html, '.btn:focus-visible'));
+  assert.ok(cssRule(html, '.btn:disabled'));
+  assert.ok(cssRule(html, '.btn[aria-busy="true"]'));
+  assert.ok(cssRule(html, '.frow input[aria-invalid="true"]'));
+  assert.ok(cssRule(html, '.status.err'));
 });
 
 test('disabled provider cards and reference options do not fade their text through ancestor opacity', () => {
@@ -116,7 +270,7 @@ test('typing and arrow navigation reopen closed combobox result lists', () => {
   );
 });
 
-test('renderer preserves provider CRUD, history, apply, restore, update, and launch-at-login controls', () => {
+test('renderer preserves provider CRUD, history, apply, restore, update, and launch-at-login controls', async () => {
   const html = render();
   for (const marker of [
     'id="providerGrid"',
@@ -129,6 +283,47 @@ test('renderer preserves provider CRUD, history, apply, restore, update, and lau
     'function importJson(',
   ]) {
     assert.ok(html.includes(marker), `missing preserved management marker: ${marker}`);
+  }
+  for (const endpoint of [
+    '/__admin/providers',
+    '/__admin/provider-presets',
+    '/__admin/providers/export',
+    '/__admin/providers/toggle',
+    '/__admin/providers/delete',
+    '/__admin/provider-discover',
+    '/__admin/providers/update',
+    '/__admin/env-keys/delete',
+    '/__admin/env-keys/save',
+    '/__admin/fetch-capabilities',
+    '/__admin/history',
+    '/__admin/history/restore',
+    '/__admin/codex-apply',
+    '/__admin/codex-restore',
+    '/__admin/autostart',
+    '/__admin/update/check',
+    '/__admin/update/run',
+    '/__admin/update/status',
+  ]) {
+    assert.ok(html.includes(endpoint), `missing preserved endpoint: ${endpoint}`);
+  }
+
+  const exports = await import('../src/admin-page.js');
+  for (const helper of [
+    'filterOptions',
+    'mergeSelectedModels',
+    'getProviderSaveProblem',
+    'deriveProviderBaseUrl',
+    'nextOptionIndex',
+    'combineCapability',
+    'discoveryStatusCopy',
+    'shouldCloseModalOnEscape',
+    'shouldConsumeComboboxEscape',
+    'clearSensitiveModalFields',
+    'markDiscoveredModels',
+    'resolveDiscoveryModelSource',
+    'isModelToggleAllowed',
+  ]) {
+    assert.equal(typeof exports[helper], 'function', `missing preserved public helper: ${helper}`);
   }
 });
 
