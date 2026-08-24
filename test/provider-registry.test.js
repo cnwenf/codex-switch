@@ -71,10 +71,44 @@ test('derived connection fields reject invalid identifiers and normalize Azure U
     resolveProviderConnection('azure-openai', { resource_endpoint: 'https://example.openai.azure.com/openai/v1' }, '').baseUrl,
     'https://example.openai.azure.com/openai/v1',
   );
+  assert.equal(
+    resolveProviderConnection('azure-openai', { resource_endpoint: 'https://example.services.ai.azure.com' }, '').baseUrl,
+    'https://example.services.ai.azure.com/openai/v1',
+  );
+  assert.throws(() => resolveProviderConnection('azure-openai', { resource_endpoint: 'https://example.test' }, ''), /Azure resource host/i);
+  assert.throws(() => resolveProviderConnection('azure-openai', { resource_endpoint: 'https://example.openai.azure.com/other-path' }, ''), /origin|openai\/v1/i);
 });
 
 test('Custom and NIM only accept HTTPS or loopback HTTP URLs', () => {
   assert.throws(() => resolveProviderConnection('custom', {}, 'http://example.test/v1'), /HTTPS|loopback/i);
   assert.equal(resolveProviderConnection('custom', {}, 'http://127.0.0.1:9000/v1').baseUrl, 'http://127.0.0.1:9000/v1');
   assert.equal(resolveProviderConnection('nvidia-nim', { base_url: 'http://localhost:8000/v1' }, '').baseUrl, 'http://localhost:8000/v1');
+  assert.equal(resolveProviderConnection('custom', {}, 'http://[::1]:9000/v1').baseUrl, 'http://[::1]:9000/v1');
+  assert.equal(resolveProviderConnection('nvidia-nim', { base_url: 'http://[::1]:8000/v1' }, '').baseUrl, 'http://[::1]:8000/v1');
+});
+
+test('Bailian uses current regions and workspace hostnames', () => {
+  assert.deepEqual(
+    getProviderPreset('bailian').options.find((option) => option.name === 'region').choices,
+    ['cn-beijing', 'ap-southeast-1', 'us-east-1'],
+  );
+  assert.equal(
+    resolveProviderConnection('bailian', { region: 'cn-beijing', workspace_id: 'workspace123' }, '').baseUrl,
+    'https://workspace123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+  );
+  assert.equal(
+    resolveProviderConnection('bailian', { region: 'us-east-1', workspace_id: 'workspace123' }, '').baseUrl,
+    'https://workspace123.us-east-1.maas.aliyuncs.com/compatible-mode/v1',
+  );
+});
+
+test('Bedrock inference accepts only exact regional hosts', () => {
+  assert.equal(inferProviderType('https://bedrock-mantle.us-east-1.api.aws/v1'), 'aws-bedrock');
+  assert.equal(inferProviderType('https://bedrock-mantle.us-east-1.api.aws.evil.test/v1'), 'custom');
+  assert.equal(inferProviderType('https://bedrock-mantle.not-a-region.api.aws/v1'), 'custom');
+});
+
+test('select fields reject values outside their published choices', () => {
+  assert.throws(() => resolveProviderConnection('tencent-tokenhub', { site: 'us' }, ''), /site/i);
+  assert.throws(() => resolveProviderConnection('bailian', { region: 'us-west-1', workspace_id: '' }, ''), /region/i);
 });
