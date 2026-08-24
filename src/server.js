@@ -2019,6 +2019,18 @@ async function handleAdmin(req, bodyBuf, res) {
     return sendJson(res, 404, { error: 'not found', path: p });
   }
 
+  // ---------- health(macOS 菜单栏小程序每 5s 轮询的轻量端点) ----------
+  if (req.method === 'GET' && p === '/__admin/health') {
+    const c = getConfig();
+    const providers = (c.providers || []).filter((x) => x && x.enabled !== false).length;
+    const phase = updateState?.phase;
+    const updating = (phase && phase !== 'idle' && phase !== 'error') ? phase : null;
+    return sendJson(res, 200, {
+      ok: true, version: PKG_VERSION, mode: updateMode(),
+      uptime: Math.round(process.uptime()), providers, models: getRouteTable().size, updating,
+    });
+  }
+
   // ---------- codex side ----------
   if (req.method === 'GET' && p === '/__admin/codex-config') return sendJson(res, 200, generateCodexConfig());
   if (req.method === 'GET' && p === '/__admin/codex-status') {

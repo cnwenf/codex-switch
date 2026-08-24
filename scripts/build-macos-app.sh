@@ -79,6 +79,12 @@ PORT=$(sed -n 's/^listen *= *"[0-9.]*:\([0-9]*\)"/\1/p' "$CFG" 2>/dev/null | hea
 PORT="${PORT:-8787}"
 URL="http://127.0.0.1:$PORT/"
 mkdir -p "$HOME/.codex-switch"
+MB="$DIR/../Resources/CodexSwitchMenuBar"
+start_menubar() {
+  [ -x "$MB" ] || return 0
+  "$MB" --port "$PORT" >/dev/null 2>&1 &
+  MB_PID=$!
+}
 if lsof -tnP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   open "$URL"   # 已有实例在跑(源码安装或另一个 App 实例),直接打开管理页
   exit 0
@@ -86,7 +92,8 @@ fi
 [ -f "$HOME/.codex-switch/env" ] && . "$HOME/.codex-switch/env"
 "$NODE" "$APP/src/server.js" >> "$HOME/.codex-switch/run.log" 2>&1 &
 SERVER_PID=$!
-trap 'kill $SERVER_PID 2>/dev/null' TERM INT
+start_menubar
+trap 'kill $SERVER_PID 2>/dev/null; [ -n "${MB_PID:-}" ] && kill $MB_PID 2>/dev/null' TERM INT
 i=0
 while [ $i -lt 20 ]; do
   if lsof -tnP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then break; fi
@@ -98,6 +105,21 @@ open "$URL"
 wait $SERVER_PID
 LAUNCHER
 chmod +x "$MACOS_DIR/codex-switch-launcher"
+
+# ---------- 5.5 菜单栏小程序(可选;无 swiftc 时跳过,App 其余功能不受影响) ----------
+MB_SRC=assets/menubar/CodexSwitchMenuBar.swift
+MB_BIN="$RES/CodexSwitchMenuBar"
+if [ -f "$MB_SRC" ] && command -v swiftc >/dev/null 2>&1; then
+  if swiftc -O -framework AppKit "$MB_SRC" -o "$MB_BIN" 2>/dev/null; then
+    chmod +x "$MB_BIN"
+    codesign --force --sign - "$MB_BIN" 2>/dev/null || true
+    echo "[build] menubar app built: CodexSwitchMenuBar"
+  else
+    echo "[build] WARN: menubar app build failed(App 仍可用,只是没有状态栏图标)" >&2
+  fi
+else
+  echo "[build] skip menubar app(swiftc 不存在或源码缺失)"
+fi
 
 # ---------- 6. ad-hoc 签名 ----------
 codesign --force --sign - "$MACOS_DIR/node"
