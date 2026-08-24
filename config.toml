@@ -18,17 +18,8 @@ base_url = "https://chatgpt.com/backend-api/codex"
 auth = "chatgpt_subscription"
 models = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "codex-auto-review", "gpt-5.3-codex-spark"]
 
-# 百炼路由:剥离 Codex 的 OAuth,注入 DASHSCOPE_API_KEY。
-[[providers]]
-id = "bailian"
-name = "阿里云百炼"
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-auth = "bearer"
-token_env = "DASHSCOPE_API_KEY"
-models = ["qwen3.8-max", "qwen3.7-plus", "qwen3.7-flash"]
-
 # ---------- 模型能力覆盖(可选)----------
-# 能力解析优先级:[model_overrides] > 百炼联网获取(仅 Bailian 且配了 API key,缓存 30 分钟)
+# 能力解析优先级:[model_overrides] > provider 联网获取(支持且配了凭据时,缓存 30 分钟)
 #              > 内置静态表(见 src/caps.js) > 保守默认(128K / 无视觉 / 不声明推理档位)。
 # 配好 provider 的 API key 和 URL 后,proxy 在启动与保存配置时自动联网抓取上下文窗口与输入模态;
 # 也可手工覆盖(例如对齐企业限流或新模型):
