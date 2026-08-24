@@ -339,6 +339,9 @@ const CODEX_DIR = path.join(os.homedir(), '.codex');
 const CODEX_CFG = path.join(CODEX_DIR, 'config.toml');
 const CODEX_CATALOG = path.join(CODEX_DIR, 'catalog.json');
 const BACKUP_DIR = path.join(os.homedir(), '.codex-switch', 'backups');
+// 注入前官方形态记录(退出/一键还原时精确还原用):注入时替换掉了哪条顶层行、
+// 注入前 catalog.json 是否存在。只在「未注入 → 注入」时写入,重复注入不覆盖。
+const APPLY_STATE = path.join(os.homedir(), '.codex-switch', 'apply-state.json');
 const CATALOG_LINE = 'model_catalog_json = "~/.codex/catalog.json"   # replaces the bundled model catalog';
 // 不切换 provider,Codex 仍会把所有请求发给官方 openai;必须整体指向本地代理,
 // 由代理按 body.model 路由(官方模型 → chatgpt 后端,其余 → 各自上游)。
@@ -541,15 +544,88 @@ function listBackups() {
     .sort((a, b) => (a.at === b.at ? a.file.localeCompare(b.file) : b.at.localeCompare(a.at)));
 }
 
-function restoreLatest() {
-  const restored = [];
-  for (const original of [path.basename(CODEX_CFG), path.basename(CODEX_CATALOG)]) {
-    const b = listBackups().find((x) => x.original === original);
-    if (!b) continue;
-    fs.copyFileSync(path.join(BACKUP_DIR, b.file), path.join(CODEX_DIR, original));
-    restored.push({ file: original, from: b.file });
+function readApplyState() {
+  try { return JSON.parse(fs.readFileSync(APPLY_STATE, 'utf8')); } catch { return {}; }
+}
+function writeApplyState(patch) {
+  const s = { ...readApplyState(), ...patch };
+  fs.mkdirSync(path.dirname(APPLY_STATE), { recursive: true });
+  fs.writeFileSync(APPLY_STATE, JSON.stringify(s, null, 2) + '\n');
+}
+
+// 一键还原 / 退出自动还原:回滚「注入 codex-switch」之前的官方形态。
+// config.toml —— 手术式剥离(绝不用备份整体覆盖,否则会丢掉注入期间官方
+// codex CLI 自己写入的内容,如 [projects]):只移除我们注入的 model_provider /
+// model_catalog_json 行与 [model_providers.codexswitch] 段;注入时被替换掉的
+// 用户原有行按 apply-state.json 原样放回。
+// catalog.json —— 优先还原最近一份「未污染备份」(未注入状态下做的备份);
+// 注入前本不存在则直接删除;实在没有备份时兜底从当前文件过滤掉我们的条目。
+function restoreCodexOfficial() {
+  const actions = [];
+  const state = readApplyState();
+  if (fs.existsSync(CODEX_CFG)) {
+    const lines = fs.readFileSync(CODEX_CFG, 'utf8').split('\n');
+    const out = [];
+    let i = 0;
+    let touched = false;
+    while (i < lines.length) {
+      const l = lines[i];
+      if (/^\s*model_provider\s*=\s*"codexswitch"(\s|#|$)/.test(l)) {
+        if (state.modelProviderLine) out.push(state.modelProviderLine);
+        touched = true; i += 1; continue;
+      }
+      if (/^\s*model_catalog_json\s*=\s*"~\/\.codex\/catalog\.json"(\s|#|$)/.test(l)) {
+        if (state.catalogLine) out.push(state.catalogLine);
+        touched = true; i += 1; continue;
+      }
+      if (l.trim() === '[model_providers.codexswitch]') {
+        i += 1;
+        while (i < lines.length && !/^\s*\[/.test(lines[i])) i += 1;
+        touched = true; continue;
+      }
+      out.push(l); i += 1;
+    }
+    if (touched) {
+      fs.writeFileSync(CODEX_CFG, out.join('\n'));
+      actions.push({ file: 'config.toml', action: 'stripped', from: null });
+    } else {
+      actions.push({ file: 'config.toml', action: 'unchanged', from: null });
+    }
   }
-  return restored;
+  const cleanBackup = listBackups().find((x) => {
+    if (x.original !== path.basename(CODEX_CATALOG)) return false;
+    try { return !fs.readFileSync(path.join(BACKUP_DIR, x.file), 'utf8').includes('via codex-switch'); } catch { return false; }
+  });
+  if (cleanBackup) {
+    fs.copyFileSync(path.join(BACKUP_DIR, cleanBackup.file), CODEX_CATALOG);
+    actions.push({ file: 'catalog.json', action: 'restored', from: cleanBackup.file });
+  } else if (state.catalogExisted === false) {
+    if (fs.existsSync(CODEX_CATALOG)) {
+      fs.unlinkSync(CODEX_CATALOG);
+      actions.push({ file: 'catalog.json', action: 'removed', from: null });
+    } else {
+      actions.push({ file: 'catalog.json', action: 'unchanged', from: null });
+    }
+  } else if (fs.existsSync(CODEX_CATALOG)) {
+    try {
+      const cat = JSON.parse(fs.readFileSync(CODEX_CATALOG, 'utf8'));
+      const models = Array.isArray(cat.models) ? cat.models : [];
+      const kept = models.filter((m) => !String(m?.description || '').includes('via codex-switch'));
+      if (models.length > 0 && kept.length === 0) {
+        // 条目全部来自代理注入 → 该文件从无官方内容,直接删除,
+        // Codex 回退使用官方二进制内嵌目录(官方模型不受影响)。
+        fs.unlinkSync(CODEX_CATALOG);
+        actions.push({ file: 'catalog.json', action: 'removed', from: '条目均为代理注入,回退官方内嵌目录' });
+      } else {
+        cat.models = kept;
+        fs.writeFileSync(CODEX_CATALOG, JSON.stringify(cat, null, 2) + '\n');
+        actions.push({ file: 'catalog.json', action: 'filtered', from: `过滤掉 ${models.length - kept.length} 条代理模型条目` });
+      }
+    } catch (e) {
+      actions.push({ file: 'catalog.json', action: 'error', from: String(e.message) });
+    }
+  }
+  return actions;
 }
 
 // 合并后的 catalog.json 内容校验(写入 ~/.codex 前必过):
@@ -610,11 +686,13 @@ function validateCatalogJson(text, mine) {
 function applyToCodex() {
   const before = detectOfficial();
   const cfgExisted = fs.existsSync(CODEX_CFG);
-  const mergedCfg = mergeCodexConfigToml(cfgExisted ? fs.readFileSync(CODEX_CFG, 'utf8') : '');
+  const cfgText = cfgExisted ? fs.readFileSync(CODEX_CFG, 'utf8') : '';
+  const mergedCfg = mergeCodexConfigToml(cfgText);
   try { TOML.parse(mergedCfg); } catch (e) {
     return { ok: false, error: '合并后的 ~/.codex/config.toml 不是合法 TOML,未写入任何文件', detail: String(e.message) };
   }
-  const existingCat = fs.existsSync(CODEX_CATALOG) ? fs.readFileSync(CODEX_CATALOG, 'utf8') : '';
+  const catExisted = fs.existsSync(CODEX_CATALOG);
+  const existingCat = catExisted ? fs.readFileSync(CODEX_CATALOG, 'utf8') : '';
   const mergedCat = mergeCatalog(existingCat);
   // 严格校验只针对我们合成的条目(qwen 等);官方镜像条目逐字节来自官方二进制,
   // 结构天然合法,绝不因我们的校验规则拒绝官方内容。
@@ -624,13 +702,30 @@ function applyToCodex() {
   const v = validateCatalogJson(mergedCat, strictMine);
   if (!v.ok) return { ok: false, error: '合并后的 catalog.json 校验失败,未写入任何文件', detail: v.error };
 
+  // 手术式备份:只备份「当前未注入」的文件。已注入时当前内容就是代理配置本身,
+  // 备份它会让还原回到代理态(空操作),确保「最新备份 = 注入前官方形态」。
+  // 同时写 apply-state.json:记下注入前被替换的行,还原时原样放回;剥离式还原
+  // 不会丢失注入期间官方 codex CLI 写入的内容(见 restoreCodexOfficial)。
+  const cfgInjected = /model_provider\s*=\s*"codexswitch"/.test(cfgText);
+  const catInjected = existingCat.includes('via codex-switch');
   const backups = [];
   fs.mkdirSync(CODEX_DIR, { recursive: true });
-  const b1 = backupFile(CODEX_CFG);
-  if (b1) backups.push({ file: path.basename(CODEX_CFG), backup: path.basename(b1) });
+  if (!cfgInjected) {
+    const b1 = backupFile(CODEX_CFG);
+    if (b1) backups.push({ file: path.basename(CODEX_CFG), backup: path.basename(b1) });
+    const cfgLines = cfgText.split('\n');
+    writeApplyState({
+      at: backupTimestamp(),
+      modelProviderLine: cfgLines.find((l) => /^\s*model_provider\s*=/.test(l)) || null,
+      catalogLine: cfgLines.find((l) => /^\s*model_catalog_json\s*=/.test(l)) || null,
+    });
+  }
   fs.writeFileSync(CODEX_CFG, mergedCfg);
-  const b2 = backupFile(CODEX_CATALOG);
-  if (b2) backups.push({ file: path.basename(CODEX_CATALOG), backup: path.basename(b2) });
+  if (!catInjected) {
+    const b2 = backupFile(CODEX_CATALOG);
+    if (b2) backups.push({ file: path.basename(CODEX_CATALOG), backup: path.basename(b2) });
+    writeApplyState({ catalogExisted: catExisted });
+  }
   fs.writeFileSync(CODEX_CATALOG, mergedCat);
 
   const after = detectOfficial();
@@ -1591,9 +1686,17 @@ function applyCodex(){
   }).catch(function(e){setCodexStatus('err','✗ 应用失败: '+e.message);});
 }
 function restoreCodex(){
-  setCodexStatus('muted','正在还原最新备份…');
+  setCodexStatus('muted','正在还原注入前的官方配置…');
   api('/__admin/codex-restore',{}).then(function(j){
-    setCodexStatus('ok','✓ 已还原: '+((j.restored&&j.restored.length)?j.restored.map(function(x){return x.file+' ← '+x.from;}).join(', '):'(无备份可还原)')+' — 重启 Codex 生效');
+    var parts=(j.restored||[]).map(function(x){
+      if(x.action==='unchanged')return x.file+'(无注入,未改动)';
+      if(x.action==='stripped')return x.file+'(注入段已剥离,官方内容保留)';
+      if(x.action==='removed')return x.file+'(已删除,注入前本不存在)';
+      if(x.action==='filtered')return x.file+'('+x.from+')';
+      if(x.action==='error')return x.file+'(处理失败: '+x.from+')';
+      return x.file+(x.from?' ← '+x.from:'');
+    });
+    setCodexStatus('ok','✓ 已还原: '+(parts.length?parts.join(', '):'(无可还原内容)')+' — 重启 Codex 生效');
   }).catch(function(e){setCodexStatus('err','✗ 还原失败: '+e.message);});
 }
 
@@ -2042,7 +2145,7 @@ async function handleAdmin(req, bodyBuf, res) {
     return sendJson(res, 200, r);
   }
   if (req.method === 'POST' && p === '/__admin/codex-restore') {
-    const restored = restoreLatest();
+    const restored = restoreCodexOfficial();
     const after = detectOfficial();
     return sendJson(res, 200, { ok: true, restored, officialModels: after.officialModels });
   }

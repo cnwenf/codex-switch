@@ -24,6 +24,40 @@ func argValue(_ name: String) -> String? {
 let port = argValue("--port") ?? "8787"
 let baseURL = "http://127.0.0.1:\(port)"
 
+// 菜单栏图标:与 App 图标(logo.svg)同形 —— 左侧入口 → 中间分支点 → 两个向右箭头。
+// 自定义绘制(不依赖 SF Symbol 的方向变体),模板模式自动适配深/浅色菜单栏。
+func forkIcon() -> NSImage {
+  let img = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+    NSColor.black.setFill()
+    NSColor.black.setStroke()
+    let lines = NSBezierPath()
+    lines.lineWidth = 1.7
+    lines.lineCapStyle = .round
+    lines.move(to: NSPoint(x: 1.0, y: 9.0))      // 主干(入口 → 分支点)
+    lines.line(to: NSPoint(x: 7.5, y: 9.0))
+    lines.move(to: NSPoint(x: 7.5, y: 9.0))      // 上分支
+    lines.line(to: NSPoint(x: 13.4, y: 13.8))
+    lines.move(to: NSPoint(x: 7.5, y: 9.0))      // 下分支
+    lines.line(to: NSPoint(x: 13.4, y: 4.2))
+    lines.stroke()
+    func arrowhead(tipY: CGFloat) {              // 向右的箭头(与 App 图标一致)
+      let t = NSBezierPath()
+      t.move(to: NSPoint(x: 17.4, y: tipY))
+      t.line(to: NSPoint(x: 13.2, y: tipY - 1.9))
+      t.line(to: NSPoint(x: 13.2, y: tipY + 1.9))
+      t.close()
+      t.fill()
+    }
+    arrowhead(tipY: 13.8)
+    arrowhead(tipY: 4.2)
+    NSBezierPath(ovalIn: NSRect(x: 0.4, y: 7.7, width: 2.6, height: 2.6)).fill()   // 入口圆点
+    NSBezierPath(ovalIn: NSRect(x: 6.2, y: 7.7, width: 2.6, height: 2.6)).fill()   // 分支点圆点
+    return true
+  }
+  img.isTemplate = true
+  return img
+}
+
 final class MenuBarController: NSObject, NSApplicationDelegate {
   private var statusItem: NSStatusItem!
   private var stateItem: NSMenuItem!
@@ -37,12 +71,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
 
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     if let btn = statusItem.button {
-      if let img = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Codex Switch") {
-        img.isTemplate = true   // 模板图:自动适配深色/浅色菜单栏
-        btn.image = img
-      } else {
-        btn.title = "CS"        // 极老系统无此 SF Symbol 时的保底
-      }
+      btn.image = forkIcon()    // 自定义向右分叉图形,与 App 图标一致;模板图适配深浅色
       btn.toolTip = "Codex Switch — 检测中…"
     }
 
