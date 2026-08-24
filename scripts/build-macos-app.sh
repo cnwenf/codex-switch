@@ -68,7 +68,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# ---------- 5. 启动器:端口被占(已有实例)就只开页面;否则拉起内嵌 node 并开页面 ----------
+# ---------- 5. 启动器:优先真 AppKit 应用(连 WindowServer,Dock 图标不无限弹跳);无 swiftc 回退 sh ----------
+write_shell_launcher() {
 cat > "$MACOS_DIR/codex-switch-launcher" <<'LAUNCHER'
 #!/bin/sh
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -123,6 +124,21 @@ open "$URL"
 wait $SERVER_PID
 LAUNCHER
 chmod +x "$MACOS_DIR/codex-switch-launcher"
+}
+
+LAUNCHER_SWIFT=assets/launcher/CodexSwitchLauncher.swift
+if [ -f "$LAUNCHER_SWIFT" ] && command -v swiftc >/dev/null 2>&1; then
+  if swiftc -O -framework AppKit "$LAUNCHER_SWIFT" -o "$MACOS_DIR/codex-switch-launcher" 2>/dev/null; then
+    chmod +x "$MACOS_DIR/codex-switch-launcher"
+    echo "[build] launcher built: Swift AppKit (Dock 图标不弹跳)"
+  else
+    echo "[build] WARN: Swift launcher 编译失败,回退 sh 启动器" >&2
+    write_shell_launcher
+  fi
+else
+  echo "[build] skip Swift launcher(无 swiftc),使用 sh 启动器"
+  write_shell_launcher
+fi
 
 # ---------- 5.5 菜单栏小程序(可选;无 swiftc 时跳过,App 其余功能不受影响) ----------
 # 打成独立 LSUIElement=true 的 .app(自己的 bundle id):启动器用 open 拉起,
