@@ -26,12 +26,27 @@ Codex 的模型选择器里,**官方订阅模型**(ChatGPT 订阅)与**自有供
 
 适用于 Apple Silicon(arm64)的 Mac。无需 Node、无需 git,下载即用,自带开机自启。
 
+#### A)一键脚本安装(推荐,免 Gatekeeper)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cnwenf/codex-switch/main/scripts/install-app.sh | sh
+```
+
+脚本自动从 Releases 下载最新 DMG 并安装到 `/Applications`,随后启动。
+**首次打开不会弹 Gatekeeper**:macOS 的隔离属性(`com.apple.quarantine`)只会由浏览器 / 邮件 /
+AirDrop 等「带隔离意识」的下载器打上,`curl` 下载不打。
+
+> 在 DNS 受限网络直连 GitHub 困难时,可先克隆本仓库再执行 `sh scripts/install-app.sh`;
+> 也可手动下载 DMG 后执行 `sh scripts/install-app.sh /path/to/xxx.dmg`(离线安装/指定版本)。
+
+#### B)手动 DMG 安装
+
 **1)下载** — 从 [Releases](https://github.com/cnwenf/codex-switch/releases/latest) 下载最新的
-`CodexSwitch-<版本>-macos-arm64.dmg`(当前为 `CodexSwitch-0.2.0-macos-arm64.dmg`,约 40 MB)。
+`CodexSwitch-<版本>-macos-arm64.dmg`(约 40 MB)。
 
 **2)安装** — 双击挂载 `.dmg`,把 **Codex Switch** 图标拖进旁边的 `Applications` 文件夹即可。
 
-**3)首次打开** — App 采用本地 ad-hoc 签名,且从网络下载会附带系统隔离属性,首次启动可能被
+**3)首次打开** — App 采用本地 ad-hoc 签名,且**经浏览器下载**会附带系统隔离属性,首次启动可能被
 Gatekeeper 拦截。二选一:
 
 - 在「应用程序」里 **右键(或 ⌃ 点按)Codex Switch → 打开**,在弹窗中再点一次「打开」;或
@@ -40,6 +55,8 @@ Gatekeeper 拦截。二选一:
   ```sh
   xattr -cr "/Applications/Codex Switch.app"
   ```
+
+(仅浏览器下载安装需要此步;用上面方式 A 脚本安装的直接打开即可。)
 
 **4)使用** — 启动后服务常驻后台,并默认随**开机 / 登录自动启动**(macOS LaunchAgent)。浏览器打开配置页:
 
@@ -73,14 +90,16 @@ cd codex-switch
 ## 日常使用
 
 配置页 `http://127.0.0.1:8787/` 是统一入口:增删供应商、填 API Key、看模型能力、开关开机自启、
-「应用并备份」/「一键还原」都在页面上完成。
+「应用并备份」/「一键还原」、检查更新都在页面上完成。页头右上角显示当前版本,有新版本时会出现「更新」按钮
+(App 方式:自动下载新 DMG 安装并重启;源码方式:校验工作区干净后 `git pull` 并自动重启)。
 
 **App(DMG)方式** —— 服务由 macOS LaunchAgent 托管:
 
 - 开机 / 登录自动启动(默认开启),配置页「配置历史」里可随时勾选开关(取消勾选会移除登录项);
 - 停掉当前服务:`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.cnwenf.codex-switch.plist`;
 - 再次手动启动:直接打开「Codex Switch」App 即可;
-- 升级:下载新 DMG → 拖到「应用程序」覆盖 → 重新打开 App。
+- 升级(三选一):① 配置页右上角版本旁点「**更新**」——自动下载新版 DMG、安装并重启,带下载进度条;
+  ② 重跑一键安装脚本(自动取最新 Release);③ 下载新 DMG → 拖到「应用程序」覆盖 → 重新打开 App。
 
 **源码方式** —— 常用命令:
 
@@ -92,7 +111,8 @@ cd codex-switch
 
 ## 安全说明(请读)
 
-- **本地服务**:只监听 `127.0.0.1`,不对外网开放;无远程升级、无遥测、无日志上传。
+- **本地服务**:只监听 `127.0.0.1`,不对外网开放;无遥测、无日志上传。更新仅由用户在配置页**主动点击**发起:
+  App 方式只从本仓库的 GitHub Releases 下载官方 DMG;源码方式先校验工作区无未提交改动、只允许快进合并。
 - **不改写请求**:除按 provider 配置注入/剥离认证头外,任何请求体、路径、参数、响应一律原样转发。
 - **凭证不落配置**:proxy 自己的 `config.toml` 不放任何明文密钥。上游 API key 统一存 `~/.codex-switch/env`(chmod 600,已 gitignore 不进仓库,值绝不回传前端)——正常在供应商模态框的「API-Key」栏直接填写即可;如需手工维护:
 
