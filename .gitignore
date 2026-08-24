@@ -10,3 +10,4 @@ config.local.toml
 run.pid
 # 打包产物(App/DMG/下载的 Node),DMG 走 GitHub Releases 不进 git
 dist/
+.worktrees/
