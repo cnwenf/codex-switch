@@ -7,6 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "test": "node --test",
     "start": "sh scripts/start.sh",
     "stop": "node src/server.js stop",
     "status": "node src/server.js status"
