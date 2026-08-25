@@ -32,6 +32,10 @@ Codex 的 `codexswitch` provider 使用 `requires_openai_auth = true`，由 Code
 
 因此准确承诺是“不改应用层 JSON / SSE payload”，而不是“除认证外所有 header 和线缆字节不变”。上游 401/403 等状态原样回到客户端；发现 API 的错误则走单独的脱敏状态模型。
 
+每次代理请求创建独立 `AbortController`。下游 request aborted、response 在正常 finish 前 close，或客户端在上游 header 返回前断开，都会取消唯一一次上游 `fetch`；已经建立的 Web body / Node stream 在异常和 close 路径被 cancel/destroy，并移除生命周期监听器。正常 response finish 不触发 abort，SSE payload 继续按收到的字节顺序透传。`POST /responses` 不自动重试，因为请求可能已经在上游开始执行。
+
+连接建立失败只向客户端和日志投影稳定的 allowlist cause code：`EMFILE`、`ECONNRESET`、`ETIMEDOUT`、`ENOTFOUND`、`EAI_AGAIN`，TLS 证书类错误统一为 `TLS_CERT`，其余为 `UNKNOWN`。异常 message、cause message、上游 URL、header 和凭证不进入 502 body 或 `run.log`；下游已关闭时不再尝试写错误响应。
+
 ## 4. 总体架构
 
 ```text
@@ -211,6 +215,7 @@ adapter table 隔离异构 API：
 - 初始 URL、redirect、pagination link、cursor/path/query/fragment 都检查原始及最多三层 percent decoding，畸形或过深编码 fail closed。
 - 单请求超时 10 秒；JSON response 最多 4 MiB；最多 5 页、2,000 个模型。越界时立即取消 reader 并返回稳定错误。
 - 上游错误正文和内部 stack 不返回浏览器；HTTP 状态映射成固定 validation state/message。
+- 源码启动器、打包 Swift launcher 和打包 shell fallback 在启动 child Node 前共用 `scripts/prepare-ca.sh`：保留已有 `NODE_EXTRA_CA_CERTS` 文件内容，合并标准 macOS system/login keychain 证书，再只把 bundle 路径传给 child。该逻辑不依赖交互 shell 已经导出企业 CA，也不把证书正文写入日志；非 macOS 或缺少 `security` 时不猜测 CA。
 - DMG 安装先把应用复制到已规范化 Applications 父目录内的随机 staging，再用 DMG 内置 Node 的 `rename(2)` 将旧目标移到同目录随机 backup、把 staging 原子改名为最终 `.app`；最终路径若在校验后被换成 symlink，只移动/替换链接本身，不跟随到链接目标。清理只作用于安装器自己在该父目录创建的随机 staging/backup 和下载临时目录。断电或恶意并发导致第二次 rename 失败时安装会 fail closed，并可能保留随机 backup 供手工恢复；这里不宣称跨断电事务。
 
 这些限制降低 SSRF、Bearer 跨域转发、无限分页、内存放大和错误正文泄密风险。它们不把未验证的 Custom endpoint 升级成可信厂商。

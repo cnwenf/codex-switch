@@ -11,6 +11,7 @@ import os from 'node:os';
 import { execFileSync, execFile, spawn } from 'node:child_process';
 import https from 'node:https';
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import TOML from '@iarna/toml';
 import { renderAdminPage } from './admin-page.js';
@@ -24,6 +25,7 @@ import {
 } from './caps.js';
 import { officialCatalog } from './official.js';
 import { discoverProvider } from './provider-discovery.js';
+import { safeUpstreamCauseCode } from './proxy-errors.js';
 import {
   buildProvidersRegion,
   ENV_NAME_RE,
@@ -1013,6 +1015,26 @@ function sendHtml(res, status, html) {
 async function forwardToUpstream(req, bodyBuf, provider, suffix, res) {
   const upstreamUrl = provider.base_url.replace(/\/+$/, '') + suffix;
   const plan = authPlan(provider);
+  const controller = new AbortController();
+  let upstream = null;
+  let nodeStream = null;
+  let streamedToCompletion = false;
+
+  const downstreamClosed = () => req.aborted || res.destroyed || res.writableEnded;
+  const abortUpstream = () => {
+    if (res.writableFinished) return;
+    if (!controller.signal.aborted) controller.abort();
+    if (nodeStream && !nodeStream.destroyed) nodeStream.destroy();
+  };
+  const abortOnResponseClose = () => {
+    if (!res.writableFinished) abortUpstream();
+  };
+  const removeDownstreamListeners = () => {
+    req.off('aborted', abortUpstream);
+    res.off('close', abortOnResponseClose);
+  };
+  req.once('aborted', abortUpstream);
+  res.once('close', abortOnResponseClose);
 
   const headers = {};
   for (const [k, v] of Object.entries(req.headers)) {
@@ -1024,34 +1046,56 @@ async function forwardToUpstream(req, bodyBuf, provider, suffix, res) {
   }
   for (const [k, v] of Object.entries(plan.set)) headers[k] = v;
 
-  let upstream;
   try {
     upstream = await fetch(upstreamUrl, {
       method: req.method,
       headers,
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : bodyBuf,
+      signal: controller.signal,
     });
   } catch (e) {
-    sendJson(res, 502, { error: 'upstream connect failed', detail: String(e.message), upstream: upstreamUrl });
-    return;
+    removeDownstreamListeners();
+    if (controller.signal.aborted || downstreamClosed()) return;
+    const code = safeUpstreamCauseCode(e);
+    console.warn(`[codex-switch] upstream request failed: code=${code}`);
+    return sendJson(res, 502, { error: 'upstream connect failed', code });
   }
 
-  const outHeaders = {};
-  upstream.headers.forEach((v, k) => {
-    const lk = k.toLowerCase();
-    if (HOP_BY_HOP.has(lk)) return;
-    // streaming raw bytes: drop length/encoding (fetch may have decompressed)
-    if (lk === 'content-length' || lk === 'content-encoding') return;
-    outHeaders[k] = v;
-  });
-  res.writeHead(upstream.status, outHeaders);
+  try {
+    if (downstreamClosed()) return;
+    const outHeaders = {};
+    upstream.headers.forEach((v, k) => {
+      const lk = k.toLowerCase();
+      if (HOP_BY_HOP.has(lk)) return;
+      // streaming raw bytes: drop length/encoding (fetch may have decompressed)
+      if (lk === 'content-length' || lk === 'content-encoding') return;
+      outHeaders[k] = v;
+    });
+    res.writeHead(upstream.status, outHeaders);
 
-  if (upstream.body) {
-    const nodeStream = Readable.fromWeb(upstream.body);
-    nodeStream.on('error', () => { try { res.destroy(); } catch {} });
-    nodeStream.pipe(res);
-  } else {
-    res.end();
+    if (upstream.body) {
+      nodeStream = Readable.fromWeb(upstream.body);
+      await pipeline(nodeStream, res);
+      streamedToCompletion = true;
+    } else {
+      res.end();
+      streamedToCompletion = true;
+    }
+  } catch (e) {
+    if (!controller.signal.aborted && !downstreamClosed()) {
+      const code = safeUpstreamCauseCode(e);
+      console.warn(`[codex-switch] upstream response failed: code=${code}`);
+      if (!res.headersSent) sendJson(res, 502, { error: 'upstream response failed', code });
+      else try { res.destroy(); } catch {}
+    }
+  } finally {
+    removeDownstreamListeners();
+    if (!streamedToCompletion) {
+      if (nodeStream && !nodeStream.destroyed) nodeStream.destroy();
+      else if (upstream?.body && !upstream.body.locked) {
+        try { await upstream.body.cancel(); } catch {}
+      }
+    }
   }
 }
 
@@ -2011,7 +2055,10 @@ function handle(req, res) {
       console.warn('[codex-switch] admin request failed');
       sendJson(res, 500, { error: 'internal server error' });
     });
-    else if (isProxy) handleProxy(req, bodyBuf, res).catch((e) => sendJson(res, 500, { error: String(e.message) }));
+    else if (isProxy) handleProxy(req, bodyBuf, res).catch(() => {
+      console.warn('[codex-switch] proxy request failed: code=INTERNAL');
+      sendJson(res, 500, { error: 'internal proxy error' });
+    });
     else sendJson(res, 404, { error: 'not found', path: url.pathname });
   });
   req.on('error', () => { try { res.destroy(); } catch {} });

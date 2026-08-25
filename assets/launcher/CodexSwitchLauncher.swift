@@ -24,6 +24,7 @@ let nodeBin = bundlePath + "/Contents/MacOS/node"
 let appDir = bundlePath + "/Contents/Resources/app"
 let serverJs = appDir + "/src/server.js"
 let cfgPath = appDir + "/config.toml"
+let prepareCA = appDir + "/scripts/prepare-ca.sh"
 
 // 从 config.toml 读端口(listen = "127.0.0.1:8787"),读不到回退 8787
 func configPort() -> String {
@@ -91,8 +92,8 @@ func startServer() {
   logHandle.seekToEndOfFile()
   let sh = Process()
   sh.executableURL = URL(fileURLWithPath: "/bin/sh")
-  // 先 source env(如有)再 exec node:sh 被 node 替换,子进程 pid 即 node pid,可直接 terminate
-  sh.arguments = ["-c", "if [ -f \"\(envFile)\" ]; then . \"\(envFile)\"; fi; exec \"\(nodeBin)\" \"\(serverJs)\""]
+  // 先 source env 与共享 CA 准备逻辑再 exec node:sh 被 node 替换,子进程 pid 即 node pid,可直接 terminate
+  sh.arguments = ["-c", "if [ -f \"\(envFile)\" ]; then . \"\(envFile)\"; fi; if [ -f \"\(prepareCA)\" ]; then . \"\(prepareCA)\"; fi; exec \"\(nodeBin)\" \"\(serverJs)\""]
   sh.standardOutput = logHandle
   sh.standardError = logHandle
   do { try sh.run() } catch { return }

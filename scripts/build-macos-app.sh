@@ -43,6 +43,8 @@ chmod +x "$MACOS_DIR/node"
 cp package.json package-lock.json config.toml "$RES/app/"
 mkdir -p "$RES/app/src"
 cp src/*.js "$RES/app/src/"
+mkdir -p "$RES/app/scripts"
+cp scripts/prepare-ca.sh "$RES/app/scripts/"
 # App 图标(assets/logo.svg → assets/app.icns,iconutil 编译产物)
 [ -f assets/app.icns ] && cp assets/app.icns "$RES/app.icns"
 ( cd "$RES/app" && npm ci --omit=dev --ignore-scripts --no-fund --no-audit --loglevel=error )
@@ -101,6 +103,7 @@ if lsof -tnP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   exit 0
 fi
 [ -f "$HOME/.codex-switch/env" ] && . "$HOME/.codex-switch/env"
+. "$APP/scripts/prepare-ca.sh"
 "$NODE" "$APP/src/server.js" >> "$HOME/.codex-switch/run.log" 2>&1 &
 SERVER_PID=$!
 start_menubar

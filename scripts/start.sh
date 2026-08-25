@@ -14,20 +14,6 @@
 cd "$(dirname "$0")/.." || exit 1
 
 DIR="$HOME/.codex-switch"
-BUNDLE="$DIR/extra-ca.pem"
-
-if [ -d /System/Library/Keychains ] && command -v security >/dev/null 2>&1; then
-  mkdir -p "$DIR"
-  : > "$BUNDLE"
-  [ -n "$NODE_EXTRA_CA_CERTS" ] && cat "$NODE_EXTRA_CA_CERTS" >> "$BUNDLE" 2>/dev/null
-  security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain >> "$BUNDLE" 2>/dev/null
-  LK=$(security login-keychain 2>/dev/null | sed -n 's/.*"\([^"]*\.keychain[^"]*\)".*/\1/p')
-  [ -n "$LK" ] && security find-certificate -a -p "$LK" >> "$BUNDLE" 2>/dev/null
-  if [ -s "$BUNDLE" ]; then
-    export NODE_EXTRA_CA_CERTS="$BUNDLE"
-    echo "[codex-switch] extra CA bundle -> $BUNDLE (env value + macOS keychains)"
-  fi
-fi
 
 # 本地环境变量(如各 provider 的 API key)。文件由用户自行创建(chmod 600),
 # 例如含一行 DASHSCOPE_API_KEY=sk-...;不存在则跳过。
@@ -36,6 +22,13 @@ if [ -f "$ENV_FILE" ]; then
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   echo "[codex-switch] loaded local env: $ENV_FILE"
+fi
+
+# Apply this after the local env so an env-file NODE_EXTRA_CA_CERTS value is
+# preserved in the combined bundle too.
+. ./scripts/prepare-ca.sh
+if [ "${NODE_EXTRA_CA_CERTS:-}" = "$DIR/extra-ca.pem" ]; then
+  echo "[codex-switch] extra CA bundle -> $NODE_EXTRA_CA_CERTS (env value + macOS keychains)"
 fi
 
 exec node src/server.js "$@"

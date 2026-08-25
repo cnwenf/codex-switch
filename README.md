@@ -17,6 +17,8 @@
 
 Codex 的模型选择器会把启用 provider 的模型合并展示。选中模型后，codex-switch 按原始 model ID 选择上游：ChatGPT 订阅沿用 Codex OAuth，第三方 API 替换为对应 Bearer 凭证；应用层 JSON 和 SSE payload 不改写。作为正常 HTTP 代理，它会剥离 hop-by-hop header、替换认证，并在 `fetch` 可能解压响应后移除不再准确的 `content-length` / `content-encoding`。
 
+Responses SSE 的连接生命周期也随下游绑定：Codex 取消请求、关闭响应，或在上游返回 header 前断开时，代理会取消对应的单次上游 `fetch` 并销毁响应流；正常完成的 SSE 不会被误取消。代理不会自动重试 `POST /responses`，避免一次取消或网络错误导致同一推理被重复执行。
+
 ![Codex 模型选择器中的订阅与第三方模型](assets/screenshot-model-picker.png)
 
 ## 厂商目录与 Responses 兼容性
@@ -95,6 +97,8 @@ xattr -cr "/Applications/Codex Switch.app"
 
 App 默认用 macOS LaunchAgent 在登录时启动，菜单栏可查看状态、打开配置页、检查更新或退出。退出 App 会剥离 codex-switch 注入的 Codex 配置，保留 Codex 自己的其他设置。
 
+源码启动和打包 App 启动都会为 child Node 合并已有 `NODE_EXTRA_CA_CERTS` 与 macOS system/login keychain 证书，供企业 HTTPS 代理环境使用；已有 CA 文件不会被改写。证书内容不会写入 `run.log`，日志只会记录最终 bundle 路径。
+
 ### 源码安装
 
 需要 Node.js 20+：
@@ -128,6 +132,7 @@ v0.5.0 的管理页采用浅色冷灰画布、不透明表面和单一蓝色主�
 - Custom 和 NIM 只允许 HTTPS，或 loopback HTTP；发现请求限制同源跳转并阻止公网/loopback 目标类别切换，降低 SSRF 与凭证转发风险。
 - 每个发现请求 10 秒超时，响应最多 4 MiB，最多 3 次同源跳转、5 页和 2,000 个模型；上游正文、堆栈和包含 Key 的模型字段不会返回。
 - API Key 只通过管理 POST body 参与检测，不进入 URL 或日志。管理页新增/轮换的 Key 位于 `~/.codex-switch/env`（mode `0600`），新配置只保存环境变量名。旧版 `config.toml` 的 inline `token` 仍能兼容读取，应尽快迁移到 env 文件并移除明文。
+- 上游连接失败的 502 只返回稳定的脱敏 `code`，并在 `run.log` 记录同一个 code；不会返回或记录上游 URL、异常 message、header 或凭证。当前公开码包括 `EMFILE`、`ECONNRESET`、`ETIMEDOUT`、`ENOTFOUND`、`EAI_AGAIN`、`TLS_CERT`，其他原因统一为 `UNKNOWN`。
 - 正常列表、编辑和检测遵守“Key 不回显”：不会回填已保存值。现有“复制为 JSON”是明确的敏感导出操作，可能把 Key 写入剪贴板；页面会标注“含 API Key，勿外传”。
 - Codex 的 `~/.codex/auth.json` 和 `~/.codex/config.toml` 只读或手术式合并；应用前自动备份，可一键还原，不覆盖无关配置。
 
@@ -153,6 +158,8 @@ requires_openai_auth = true
 ```
 
 模型 ID 必须和上游路由 ID 完全一致，因为代理不会改写 body 里的 `model`。
+
+如果长时间运行后看到 `502`，先查看 JSON 的 `code` 或 `~/.codex-switch/run.log` 中的同名脱敏 code。`EMFILE` 表示进程文件描述符耗尽；当前版本会在下游取消时同步关闭上游 SSE，修复旧版本反复取消会话后连接累积、最终出现 `EMFILE` 的问题。升级后若仍出现该 code，应记录复现次数和 FD 变化继续排查，而不是自动重放 POST。
 
 ## 验证边界
 
