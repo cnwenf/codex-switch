@@ -187,6 +187,7 @@ function createFixture(t, {
   fs.mkdirSync(bin);
   fs.mkdirSync(home);
   fs.mkdirSync(tagDir);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.mkdirSync(path.join(mount, 'Codex Switch.app'), { recursive: true });
 
   const version = tag.slice(1);
@@ -931,4 +932,58 @@ test('a local DMG bypasses curl and preserves the installation/launch path', (t)
   assert.equal(readLog(fixture.logs.curl).length, 0);
   assert.match(readLog(fixture.logs.install).join('\n'), new RegExp(fixture.dest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(readLog(fixture.logs.open).join('\n'), new RegExp(fixture.dest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('installer rejects unsafe destination overrides before mount or copy', async (t) => {
+  const cases = [
+    ['filesystem root', '/'],
+    ['home directory', null],
+    ['Applications directory', '/Applications'],
+    ['relative path', 'Applications/Codex Switch.app'],
+    ['dot segment', '/tmp/../Applications/Codex Switch.app'],
+    ['wrong app basename', '/tmp/Other.app'],
+    ['unexpected parent', '/tmp/Codex Switch.app'],
+  ];
+
+  for (const [label, requestedDestination] of cases) {
+    await t.test(label, (subtest) => {
+      const fixture = createFixture(subtest);
+      fixture.env.CODEX_SWITCH_INSTALL_DEST = requestedDestination ?? fixture.env.HOME;
+      const result = runInstaller(fixture, fixture.dmg);
+
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /安装目标.*无效|拒绝.*安装目标/);
+      assert.equal(readLog(fixture.logs.hdiutil).length, 0);
+      assert.equal(readLog(fixture.logs.install).length, 0);
+    });
+  }
+});
+
+test('installer rejects an explicitly empty destination before mount or copy', (t) => {
+  const fixture = createFixture(t);
+  fixture.env.CODEX_SWITCH_INSTALL_DEST = '';
+
+  const result = runInstaller(fixture, fixture.dmg);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /安装目标.*不能为空/);
+  assert.equal(readLog(fixture.logs.hdiutil).length, 0);
+  assert.equal(readLog(fixture.logs.install).length, 0);
+});
+
+test('installer rejects destination symlink escapes before mount or copy', (t) => {
+  const fixture = createFixture(t);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-installer-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const linkedParent = path.join(fixture.root, 'linked-Applications');
+  fs.symlinkSync(outside, linkedParent);
+  fixture.env.CODEX_SWITCH_INSTALL_DEST = path.join(linkedParent, 'Codex Switch.app');
+
+  const result = runInstaller(fixture, fixture.dmg);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /安装目标.*无效|拒绝.*安装目标/);
+  assert.equal(readLog(fixture.logs.hdiutil).length, 0);
+  assert.equal(readLog(fixture.logs.install).length, 0);
+  assert.equal(fs.existsSync(path.join(outside, 'Codex Switch.app')), false);
 });

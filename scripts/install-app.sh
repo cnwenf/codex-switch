@@ -15,7 +15,13 @@ set -e
 umask 077
 
 APP_NAME="Codex Switch"
-DEST="${CODEX_SWITCH_INSTALL_DEST:-/Applications/$APP_NAME.app}"
+DEST_OVERRIDE_SET=false
+if [ "${CODEX_SWITCH_INSTALL_DEST+x}" = x ]; then
+  DEST_OVERRIDE_SET=true
+  DEST=$CODEX_SWITCH_INSTALL_DEST
+else
+  DEST="/Applications/$APP_NAME.app"
+fi
 REPO="cnwenf/codex-switch"
 SRC=
 RELEASE_TAG=
@@ -25,6 +31,50 @@ RELEASE_TIMEOUT_SECONDS="${CODEX_SWITCH_RELEASE_TIMEOUT_SECONDS:-900}"
 
 say() { printf '[install] %s\n' "$*"; }
 die() { printf '[install] %s\n' "$*" >&2; exit 1; }
+
+validate_install_destination() {
+  if [ "$DEST_OVERRIDE_SET" = true ] && [ -z "$DEST" ]; then
+    die "安装目标无效：CODEX_SWITCH_INSTALL_DEST 不能为空。"
+  fi
+  case "$DEST" in
+    /*) ;;
+    *) die "安装目标无效：必须是规范化的绝对 .app 路径。" ;;
+  esac
+  case "$DEST" in
+    /|//*|*//*|*/./*|*/../*|*/.|*/..)
+      die "安装目标无效：拒绝根目录、重复分隔符或点路径。"
+      ;;
+  esac
+  dest_basename=$(/usr/bin/basename "$DEST") || die "安装目标无效：无法解析应用名。"
+  [ "$dest_basename" = "$APP_NAME.app" ] \
+    || die "安装目标无效：应用名必须精确为 $APP_NAME.app。"
+  [ ! -L "$DEST" ] || die "安装目标无效：目标不能是软链接。"
+
+  dest_parent=$(/usr/bin/dirname "$DEST") || die "安装目标无效：无法解析父目录。"
+  [ -d "$dest_parent" ] || die "安装目标无效：父目录不存在。"
+  physical_parent=$(CDPATH= cd -P "$dest_parent" 2>/dev/null && pwd -P) \
+    || die "安装目标无效：无法规范化父目录。"
+
+  if [ "$DEST" = "/Applications/$APP_NAME.app" ]; then
+    [ "$physical_parent" = "/Applications" ] \
+      || die "安装目标无效：系统 Applications 目录不规范。"
+    return 0
+  fi
+
+  # Test-only override stays confined to one exact Applications directory
+  # immediately below a canonical temporary root. Production destinations
+  # other than /Applications/Codex Switch.app are rejected.
+  temp_root=${TMPDIR:-/tmp}
+  [ -d "$temp_root" ] || die "安装目标无效：临时根目录不存在。"
+  physical_temp_root=$(CDPATH= cd -P "$temp_root" 2>/dev/null && pwd -P) \
+    || die "安装目标无效：无法规范化临时根目录。"
+  case "$physical_temp_root" in
+    /tmp|/tmp/*|/private/tmp|/private/tmp/*|/var/folders/*|/private/var/folders/*) ;;
+    *) die "安装目标无效：override 只能位于系统临时目录。" ;;
+  esac
+  [ "$physical_parent" = "$physical_temp_root/Applications" ] \
+    || die "安装目标无效：override 必须是临时根目录下的 Applications/$APP_NAME.app。"
+}
 
 case "$#" in
   0) ;;
@@ -39,6 +89,10 @@ case "$#" in
     ;;
   *) die "用法: sh scripts/install-app.sh [--release-tag v0.5.0|DMG URL|本地路径]" ;;
 esac
+
+# Fail closed before creating download state, mounting a DMG, stopping an old
+# process, or invoking rm/cp with a caller-controlled destination.
+validate_install_destination
 
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/codex-switch.XXXXXX" 2>/dev/null) || die "无法创建安全的临时目录。"
 trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
@@ -490,6 +544,7 @@ if [ -f "$HOME/.codex-switch/run.pid" ]; then
 fi
 
 # ---------- 4. 挂载并安装 ----------
+validate_install_destination
 say "挂载 DMG…"
 MOUNT_OUT=$(hdiutil attach "$DMG" -nobrowse -readonly -noverify -noautoopen 2>/dev/null | tail -1 | awk '{for(i=3;i<=NF;i++)printf "%s ",$i; print ""}' | sed 's/ *$//')
 [ -n "$MOUNT_OUT" ] || die "挂载失败。"
@@ -500,6 +555,7 @@ SRC_APP="$MOUNT/$APP_NAME.app"
 [ -d "$SRC_APP" ] || die "DMG 中未找到 $APP_NAME.app"
 
 say "安装到 $DEST…"
+validate_install_destination
 rm -rf "$DEST"
 cp -R "$SRC_APP" "$DEST"
 hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
