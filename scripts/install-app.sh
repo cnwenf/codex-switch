@@ -156,6 +156,12 @@ download_file() {
 json_to_plist() {
   json_input=$1
   plist_output=$2
+  # PlistBuddy on some macOS releases silently strips JSON \u0000 values.
+  # Reject the escape before conversion so hostile tag or asset names cannot
+  # normalize into the trusted release metadata compared below.
+  if LC_ALL=C /usr/bin/grep -Eiq '\\u0000' "$json_input"; then
+    return 1
+  fi
   /usr/bin/plutil -convert xml1 -o "$plist_output" "$json_input" >/dev/null 2>&1
 }
 

@@ -167,9 +167,10 @@ test('build-generated shell fallback uses native system CA and packages no CA ge
   installToolLinks(bin, {
     awk: '/usr/bin/awk', cat: '/bin/cat', chmod: '/bin/chmod', cp: '/bin/cp', dirname: '/usr/bin/dirname',
     du: '/usr/bin/du', grep: '/usr/bin/grep', head: '/usr/bin/head', ln: '/bin/ln',
-    mkdir: '/bin/mkdir', rm: '/bin/rm', sed: '/usr/bin/sed', shasum: '/usr/bin/shasum',
+    mkdir: '/bin/mkdir', rm: '/bin/rm', sed: '/usr/bin/sed',
     sleep: '/bin/sleep', tar: '/usr/bin/tar',
   });
+  writeExecutable(path.join(bin, 'shasum'), '#!/bin/sh\nexec /usr/bin/shasum "$@"\n');
   writeExecutable(path.join(bin, 'node'), `#!/bin/sh
 if [ "$1" = "-p" ]; then printf '%s\\n' '0.5.0'; exit 0; fi
 {
