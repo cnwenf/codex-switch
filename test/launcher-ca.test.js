@@ -63,8 +63,13 @@ function assertCertificateBundle(bundle, expectedCommonNames) {
   const parsed = spawnSync('openssl', [
     'pkcs7', '-in', pkcs7, '-print_certs', '-noout',
   ], { encoding: 'utf8' });
+  fs.rmSync(pkcs7, { force: true });
   assert.equal(parsed.status, 0, parsed.stderr);
   for (const commonName of expectedCommonNames) assert.match(parsed.stdout, new RegExp(`CN=${commonName}`));
+}
+
+function modeBits(target) {
+  return fs.statSync(target).mode & 0o777;
 }
 
 test('CA preparation preserves an unset inherited NODE_EXTRA_CA_CERTS state when no bundle can be built', () => {
@@ -164,6 +169,292 @@ exit 1
   assert.match(fs.readFileSync(bundle, 'utf8'), /END CERTIFICATE-----\n-----BEGIN CERTIFICATE/);
 
   assertCertificateBundle(bundle, ['existing-extra-ca', 'system-keychain-ca']);
+});
+
+test('CA preparation accepts and normalizes a valid CRLF PEM bundle', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-ca-crlf-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  fs.mkdirSync(home);
+  fs.mkdirSync(bin);
+  const inherited = createCertificate(root, 'crlf-inherited-ca');
+  const systemCert = createCertificate(root, 'crlf-system-ca');
+  fs.writeFileSync(inherited, fs.readFileSync(inherited, 'utf8').replace(/\n/g, '\r\n'));
+  const systemKeychain = path.join(root, 'system.keychain');
+  fs.writeFileSync(systemKeychain, 'fixture');
+  const fixtureEnv = writeSecurityFixture(bin, { systemOutput: systemCert });
+
+  const result = runPrepareCA({ home, bin, inherited, systemKeychain, extraEnv: fixtureEnv });
+
+  const bundle = path.join(home, '.codex-switch', 'extra-ca.pem');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, bundle);
+  assert.equal(fs.readFileSync(bundle).includes(13), false);
+  assertCertificateBundle(bundle, ['crlf-inherited-ca', 'crlf-system-ca']);
+});
+
+test('CA preparation completes a real certificate build from fully hostile paths', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-ca-' newline\nbackslash \\ $(touch PWNED_SUB) `touch PWNED_TICK`-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, "home ' \n tab\t \\ $() `tick`");
+  const bin = path.join(root, "bin ' \n tab\t \\ $() `tick`");
+  const state = path.join(home, ".state ' \n tab\t \\ $() `tick`");
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  const inherited = createCertificate(root, "hostile-inherited-ca");
+  const systemCert = createCertificate(root, "hostile-system-ca");
+  const systemKeychain = path.join(root, "system ' \n \\ $() `tick`.keychain");
+  fs.writeFileSync(systemKeychain, 'fixture');
+  const fixtureEnv = writeSecurityFixture(bin, { systemOutput: systemCert });
+
+  const result = runPrepareCA({
+    home,
+    bin,
+    inherited,
+    systemKeychain,
+    extraEnv: { ...fixtureEnv, CODEX_SWITCH_STATE_DIR: state },
+  });
+
+  const bundle = path.join(state, 'extra-ca.pem');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, bundle);
+  assertCertificateBundle(bundle, ['hostile-inherited-ca', 'hostile-system-ca']);
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, 'PWNED_SUB')), false);
+  assert.equal(fs.existsSync(path.join(REPO_ROOT, 'PWNED_TICK')), false);
+  assert.deepEqual(fs.readdirSync(state), ['extra-ca.pem']);
+  assert.equal(modeBits(state), 0o700);
+  assert.equal(modeBits(bundle), 0o600);
+});
+
+test('CA preparation refuses a symlink state directory without modifying its victim', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-ca-state-symlink-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const victimDir = path.join(root, 'victim');
+  const state = path.join(home, '.codex-switch');
+  fs.mkdirSync(home);
+  fs.mkdirSync(bin);
+  fs.mkdirSync(victimDir);
+  fs.symlinkSync(victimDir, state);
+  const inherited = createCertificate(root, 'state-symlink-inherited-ca');
+  const systemCert = createCertificate(root, 'state-symlink-system-ca');
+  const systemKeychain = path.join(root, 'system.keychain');
+  fs.writeFileSync(systemKeychain, 'fixture');
+  const fixtureEnv = writeSecurityFixture(bin, { systemOutput: systemCert });
+
+  const result = runPrepareCA({ home, bin, inherited, systemKeychain, extraEnv: fixtureEnv });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, inherited);
+  assert.deepEqual(fs.readdirSync(victimDir), []);
+  assert.match(result.stderr, /unsafe CA state directory/);
+  assert.equal(result.stderr.includes(state), false);
+});
+
+test('CA preparation repairs private state-directory permissions before creating scratch files', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-ca-state-mode-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const state = path.join(home, '.codex-switch');
+  fs.mkdirSync(state, { recursive: true, mode: 0o777 });
+  fs.chmodSync(state, 0o777);
+  fs.mkdirSync(bin);
+  const inherited = createCertificate(root, 'state-mode-inherited-ca');
+  const systemCert = createCertificate(root, 'state-mode-system-ca');
+  const systemKeychain = path.join(root, 'system.keychain');
+  fs.writeFileSync(systemKeychain, 'fixture');
+  const fixtureEnv = writeSecurityFixture(bin, { systemOutput: systemCert });
+
+  const result = runPrepareCA({ home, bin, inherited, systemKeychain, extraEnv: fixtureEnv });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, path.join(state, 'extra-ca.pem'));
+  assert.equal(modeBits(state), 0o700);
+});
+
+test('CA preparation rejects a final bundle symlink and never modifies its victim', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-ca-final-symlink-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const state = path.join(home, '.codex-switch');
+  fs.mkdirSync(state, { recursive: true });
+  fs.mkdirSync(bin);
+  const inherited = createCertificate(root, 'final-symlink-inherited-ca');
+  const systemCert = createCertificate(root, 'final-symlink-system-ca');
+  const victim = path.join(root, 'victim.pem');
+  const bundle = path.join(state, 'extra-ca.pem');
+  fs.writeFileSync(victim, 'DO NOT MODIFY\n');
+  const before = fs.readFileSync(victim);
+  fs.symlinkSync(victim, bundle);
+  const systemKeychain = path.join(root, 'system.keychain');
+  fs.writeFileSync(systemKeychain, 'fixture');
+  const fixtureEnv = writeSecurityFixture(bin, { systemOutput: systemCert });
+
+  const result = runPrepareCA({ home, bin, inherited, systemKeychain, extraEnv: fixtureEnv });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, inherited);
+  assert.deepEqual(fs.readFileSync(victim), before);
+  assert.equal(fs.lstatSync(bundle).isSymbolicLink(), true);
+  assert.match(result.stderr, /unsafe existing extra CA bundle/);
+});
+
+test('CA preparation rejects a symlink returned by mktemp without touching its victim', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-ca-mktemp-symlink-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const state = path.join(home, '.codex-switch');
+  fs.mkdirSync(state, { recursive: true });
+  fs.mkdirSync(bin);
+  const inherited = createCertificate(root, 'mktemp-inherited-ca');
+  const systemCert = createCertificate(root, 'mktemp-system-ca');
+  const victim = path.join(root, 'victim');
+  const trap = path.join(state, '.attacker-temp');
+  fs.writeFileSync(victim, 'DO NOT MODIFY\n');
+  const before = fs.readFileSync(victim);
+  fs.symlinkSync(victim, trap);
+  fs.writeFileSync(path.join(bin, 'mktemp'), `#!/bin/sh\nprintf '%s\\n' "$MKTEMP_ATTACK_PATH"\n`, { mode: 0o755 });
+  const systemKeychain = path.join(root, 'system.keychain');
+  fs.writeFileSync(systemKeychain, 'fixture');
+  const fixtureEnv = writeSecurityFixture(bin, { systemOutput: systemCert });
+
+  const result = runPrepareCA({
+    home,
+    bin,
+    inherited,
+    systemKeychain,
+    extraEnv: { ...fixtureEnv, MKTEMP_ATTACK_PATH: trap },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, inherited);
+  assert.deepEqual(fs.readFileSync(victim), before);
+  assert.equal(fs.lstatSync(trap).isSymbolicLink(), true);
+  assert.match(result.stderr, /failed to create secure CA scratch files/);
+});
+
+test('CA publication safely replaces a target symlink introduced at the mv boundary', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-ca-publish-race-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const state = path.join(home, '.codex-switch');
+  fs.mkdirSync(state, { recursive: true });
+  fs.mkdirSync(bin);
+  const inherited = createCertificate(root, 'publish-race-inherited-ca');
+  const systemCert = createCertificate(root, 'publish-race-system-ca');
+  const oldValid = createCertificate(root, 'publish-race-old-ca');
+  const victim = path.join(root, 'victim');
+  const bundle = path.join(state, 'extra-ca.pem');
+  fs.writeFileSync(victim, 'DO NOT MODIFY\n');
+  const before = fs.readFileSync(victim);
+  fs.copyFileSync(oldValid, bundle);
+  fs.writeFileSync(path.join(bin, 'mv'), `#!/bin/sh
+/bin/rm -f "$RACE_BUNDLE"
+/bin/ln -s "$RACE_VICTIM" "$RACE_BUNDLE"
+exec /bin/mv "$@"
+`, { mode: 0o755 });
+  const systemKeychain = path.join(root, 'system.keychain');
+  fs.writeFileSync(systemKeychain, 'fixture');
+  const fixtureEnv = writeSecurityFixture(bin, { systemOutput: systemCert });
+
+  const result = runPrepareCA({
+    home,
+    bin,
+    inherited,
+    systemKeychain,
+    extraEnv: { ...fixtureEnv, RACE_BUNDLE: bundle, RACE_VICTIM: victim },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, bundle);
+  assert.deepEqual(fs.readFileSync(victim), before);
+  assert.equal(fs.lstatSync(bundle).isSymbolicLink(), false);
+  assertCertificateBundle(bundle, ['publish-race-inherited-ca', 'publish-race-system-ca']);
+});
+
+test('CA preparation exposes only fixed errors when mktemp fails noisily', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-ca-error-redaction-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  fs.mkdirSync(home);
+  fs.mkdirSync(bin);
+  const inherited = createCertificate(root, 'redaction-inherited-ca');
+  const systemCert = createCertificate(root, 'redaction-system-ca');
+  const systemKeychain = path.join(root, 'system.keychain');
+  fs.writeFileSync(systemKeychain, 'fixture');
+  const secretError = "SECRET internal path ' \n \\ $() `tick` certificate body";
+  fs.writeFileSync(path.join(bin, 'mktemp'), '#!/bin/sh\nprintf \'%s\\n\' "$SECRET_ERROR" >&2\nexit 76\n', { mode: 0o755 });
+  const fixtureEnv = writeSecurityFixture(bin, { systemOutput: systemCert });
+
+  const result = runPrepareCA({
+    home,
+    bin,
+    inherited,
+    systemKeychain,
+    extraEnv: { ...fixtureEnv, SECRET_ERROR: secretError },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, inherited);
+  assert.equal(result.stderr.includes(secretError), false);
+  assert.equal(result.stderr.includes(root), false);
+  assert.equal(result.stderr.trim(), '[codex-switch] failed to create secure CA scratch files; preserving inherited NODE_EXTRA_CA_CERTS');
+});
+
+test('CA preparation traps termination during partial scratch creation and removes only its created file', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-ca-partial-trap-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'home');
+  const bin = path.join(root, 'bin');
+  const state = path.join(home, '.codex-switch');
+  fs.mkdirSync(state, { recursive: true });
+  fs.mkdirSync(bin);
+  const inherited = createCertificate(root, 'partial-trap-inherited-ca');
+  const systemCert = createCertificate(root, 'partial-trap-system-ca');
+  const systemKeychain = path.join(root, 'system.keychain');
+  const countFile = path.join(root, 'mktemp-count');
+  const createdFile = path.join(root, 'created-path');
+  fs.writeFileSync(systemKeychain, 'fixture');
+  fs.writeFileSync(countFile, '0\n');
+  fs.writeFileSync(path.join(bin, 'mktemp'), `#!/bin/sh
+count=$(/bin/cat "$MKTEMP_COUNT_FILE") || exit 77
+count=$((count + 1))
+printf '%s\n' "$count" > "$MKTEMP_COUNT_FILE" || exit 77
+if [ "$count" -gt 1 ]; then
+  kill -TERM "$MAIN_SHELL_PID"
+  exit 78
+fi
+created=$(/usr/bin/mktemp "$@") || exit 77
+printf '%s' "$created" > "$MKTEMP_CREATED_FILE" || exit 77
+printf '%s\n' "$created"
+`, { mode: 0o755 });
+  const fixtureEnv = writeSecurityFixture(bin, { systemOutput: systemCert });
+  const command = 'MAIN_SHELL_PID=$$; export MAIN_SHELL_PID; . ./scripts/prepare-ca.sh';
+
+  const result = runPrepareCA({
+    home,
+    bin,
+    inherited,
+    systemKeychain,
+    command,
+    extraEnv: {
+      ...fixtureEnv,
+      MKTEMP_COUNT_FILE: countFile,
+      MKTEMP_CREATED_FILE: createdFile,
+    },
+  });
+
+  assert.notEqual(result.status, 0);
+  const created = fs.readFileSync(createdFile, 'utf8');
+  assert.equal(fs.existsSync(created), false);
+  assert.deepEqual(fs.readdirSync(state), []);
 });
 
 test('CA preparation rejects malformed inherited PEM without replacing the last valid bundle', (t) => {
@@ -352,10 +643,7 @@ test('CA preparation preserves the old bundle when the temporary file cannot be 
   const state = path.join(home, '.codex-switch');
   fs.mkdirSync(state, { recursive: true });
   fs.mkdirSync(bin);
-  t.after(() => {
-    fs.chmodSync(state, 0o700);
-    fs.rmSync(root, { recursive: true, force: true });
-  });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const inherited = createCertificate(root, 'temp-inherited-ca');
   const oldValid = createCertificate(root, 'temp-old-valid-ca');
   const systemCert = createCertificate(root, 'temp-system-valid-ca');
@@ -363,9 +651,9 @@ test('CA preparation preserves the old bundle when the temporary file cannot be 
   const systemKeychain = path.join(root, 'system.keychain');
   fs.copyFileSync(oldValid, oldBundle);
   fs.writeFileSync(systemKeychain, 'fixture');
+  fs.writeFileSync(path.join(bin, 'mktemp'), '#!/bin/sh\nexit 75\n', { mode: 0o755 });
   const fixtureEnv = writeSecurityFixture(bin, { systemOutput: systemCert });
   const before = fs.readFileSync(oldBundle);
-  fs.chmodSync(state, 0o500);
 
   const result = runPrepareCA({ home, bin, inherited, systemKeychain, extraEnv: fixtureEnv });
 
