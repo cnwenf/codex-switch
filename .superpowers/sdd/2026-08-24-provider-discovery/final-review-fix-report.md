@@ -104,3 +104,36 @@ All commands used the bundled Node path because the default shell did not expose
 - No real GitHub Actions run, release publication, release-asset readback, DMG mount on a real release, GUI updater run, or `/Applications` installation was performed.
 - Pre-existing user config/history files from older versions may already contain inline tokens. This wave never inspects or rewrites those files automatically; it prevents new copies and migrates a token transactionally when the corresponding provider/snapshot is explicitly touched.
 - The raw config GET contract is intentionally now a redacted JSON projection rather than verbatim TOML; mutation POST remains text/plain and identity-gated.
+
+## Scoped re-review follow-up — legacy credential precedence
+
+Date: 2026-08-25
+
+Scope ruling: the user explicitly accepts the local plaintext export/history boundary. This follow-up does not change export, history snapshot, or restore policy; it fixes only stale inline-token precedence and generated env-name collisions.
+
+### Finding and resolution
+
+`prepareLegacyInlineTokenMigrations()` previously coupled removal of every legacy inline `token` to an unconditional `saveEnvKey()`. A stale inline value could therefore overwrite a current credential already configured under that provider's `token_env`. Generated names also considered only provider references, so they could collide with unrelated names already present in the env file or process.
+
+The migration now separates config cleanup from env persistence:
+
+- When the provider's existing canonical `token_env` has a non-empty value in the env file or process, the inline token is removed while the existing env reference and value are left unchanged.
+- Only an inline token with no configured env value is persisted through the existing transactional `afterWrite` path.
+- Auto-generated names avoid the union of provider references, env-file names, and process-environment names.
+- Authorization of the inline-token cleanup, snapshot behavior, and the config/env/process/cache/generation/lease rollback wrapper remain unchanged.
+
+### Focused TDD and verification
+
+- RED: `node --test --test-name-pattern='stale legacy inline|no configured env|generated token_env' test/admin-api.test.js` — `1/4` passed and `3/4` failed for the intended reasons: the env-file value was overwritten, a process-only value caused an env file containing the stale value to be created, and the generated name selected an occupied base name. The no-env migration control passed.
+- Focused GREEN: the same command — `4/4`, `0 fail`.
+- Covering suite: `node --test test/admin-api.test.js` — `40/40`, including the existing config/env/process/cache/generation/lease rollback cases.
+- Final full suite: `npm test` — `229/229`, `0 fail`, `0 cancelled`, duration `26.028s`.
+- Static: `node --check src/server.js` and `node --check test/admin-api.test.js` both exit `0`.
+- Diff: `git diff --check` exits `0`.
+
+### Follow-up changed files and concerns
+
+- Runtime: `src/server.js`.
+- Behavioral tests: `test/admin-api.test.js`.
+- Review artifact: this appended report section.
+- No real API/OAuth key was read or used. No `/Applications` mutation, GitHub operation, release, or live-provider validation was performed. No additional concern was introduced beyond the deliberately unverified items already listed above.

@@ -87,6 +87,21 @@ function providerBlock({
   return lines.join('\n');
 }
 
+function assertSourcedEnvValue(envFile, name, expected) {
+  const sourced = spawnSync('/bin/sh', [
+    '-c',
+    '. "$1"; eval "actual=\\${$2}"; [ "$actual" = "$3" ]',
+    'sh',
+    envFile,
+    name,
+    expected,
+  ], {
+    env: process.env,
+    encoding: 'utf8',
+  });
+  assert.equal(sourced.status, 0, `expected ${name} to keep its configured value`);
+}
+
 async function startCodexSwitchFixture(t, { providers = [], childEnv = {}, upstreamHandler } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-admin-'));
   const upstreamRequests = [];
@@ -307,7 +322,71 @@ test('provider create and update reject client-supplied inline tokens without re
   assert.equal(app.output().includes(updateSecret), false);
 });
 
-test('touching a legacy inline credential migrates it transactionally to the mode-0600 env file', async (t) => {
+test('touching a stale legacy inline credential preserves the current env-file credential', async (t) => {
+  const staleSecret = 'fixture-stale-inline-file-key';
+  const currentSecret = 'fixture-current-env-file-key';
+  const tokenEnv = 'LEGACY_CURRENT_FILE_KEY';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'legacy-current-file',
+      tokenEnv,
+      token: staleSecret,
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+  });
+  const saved = await postJson(app.origin, '/__admin/env-keys/save', {
+    name: tokenEnv,
+    value: currentSecret,
+  });
+  assert.equal(saved.status, 200);
+
+  const response = await postJson(app.origin, '/__admin/providers/toggle', {
+    id: 'legacy-current-file',
+    enabled: true,
+  });
+
+  assert.equal(response.status, 200);
+  const configText = fs.readFileSync(app.configPath, 'utf8');
+  assert.equal(/\btoken\s*=/.test(configText), false);
+  assert.equal(configText.includes(staleSecret), false);
+  assertSourcedEnvValue(path.join(app.home, '.codex-switch', 'env'), tokenEnv, currentSecret);
+  assert.equal(app.upstreamRequests.at(-1).authorization === `Bearer ${currentSecret}`, true);
+  assert.equal(app.output().includes(staleSecret) || app.output().includes(currentSecret), false);
+});
+
+test('touching a stale legacy inline credential preserves a process-only credential', async (t) => {
+  const staleSecret = 'fixture-stale-inline-process-key';
+  const currentSecret = 'fixture-current-process-key';
+  const tokenEnv = 'LEGACY_CURRENT_PROCESS_KEY';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'legacy-current-process',
+      tokenEnv,
+      token: staleSecret,
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+    childEnv: { [tokenEnv]: currentSecret },
+  });
+  const envFile = path.join(app.home, '.codex-switch', 'env');
+  assert.equal(fs.existsSync(envFile), false);
+
+  const response = await postJson(app.origin, '/__admin/providers/toggle', {
+    id: 'legacy-current-process',
+    enabled: true,
+  });
+
+  assert.equal(response.status, 200);
+  const configText = fs.readFileSync(app.configPath, 'utf8');
+  assert.equal(/\btoken\s*=/.test(configText), false);
+  assert.equal(configText.includes(staleSecret), false);
+  assert.equal(fs.existsSync(envFile), false);
+  assert.equal(app.upstreamRequests.at(-1).authorization === `Bearer ${currentSecret}`, true);
+  assert.equal(app.output().includes(staleSecret) || app.output().includes(currentSecret), false);
+});
+
+test('touching a legacy inline credential with no configured env migrates it transactionally', async (t) => {
   const secret = "fixture'legacy-migration-key";
   const app = await startCodexSwitchFixture(t, {
     providers: [{
@@ -361,6 +440,47 @@ test('touching a legacy inline credential migrates it transactionally to the mod
   });
   assert.equal(sourced.status, 0);
   assert.equal(app.output().includes(secret), false);
+});
+
+test('generated token_env avoids names already present in the env file and process', async (t) => {
+  const inlineSecret = 'fixture-generated-name-migration-key';
+  const fileSecret = 'fixture-generated-name-file-key';
+  const processSecret = 'fixture-generated-name-process-key';
+  const baseName = 'CODEX_SWITCH_GENERATED_COLLISION_API_KEY';
+  const processName = `${baseName}_2`;
+  const generatedName = `${baseName}_3`;
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'generated-collision',
+      token: inlineSecret,
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+    childEnv: { [processName]: processSecret },
+  });
+  const envFile = path.join(app.home, '.codex-switch', 'env');
+  fs.mkdirSync(path.dirname(envFile), { recursive: true });
+  fs.writeFileSync(envFile, `${baseName}='${fileSecret}'\n`, { mode: 0o600 });
+
+  const response = await postJson(app.origin, '/__admin/providers/toggle', {
+    id: 'generated-collision',
+    enabled: true,
+  });
+
+  assert.equal(response.status, 200);
+  const listed = await fetch(`${app.origin}/__admin/providers`).then((result) => result.json());
+  assert.equal(listed.providers.find((provider) => provider.id === 'generated-collision').token_env, generatedName);
+  const configText = fs.readFileSync(app.configPath, 'utf8');
+  assert.equal(/\btoken\s*=/.test(configText), false);
+  assertSourcedEnvValue(envFile, baseName, fileSecret);
+  assertSourcedEnvValue(envFile, generatedName, inlineSecret);
+  assert.equal(app.upstreamRequests.at(-1).authorization === `Bearer ${inlineSecret}`, true);
+  assert.equal(
+    app.output().includes(inlineSecret)
+      || app.output().includes(fileSecret)
+      || app.output().includes(processSecret),
+    false,
+  );
 });
 
 test('env persistence rejects CR, LF, and NUL without writing or reflecting the submitted value', async (t) => {

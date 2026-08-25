@@ -1328,7 +1328,9 @@ function restoreHistory(file) {
     authorizedBearerProviderIds: inlineMigrations.map((migration) => migration.providerId),
     afterWrite: inlineMigrations.length
       ? () => {
-        for (const migration of inlineMigrations) saveEnvKey(migration.tokenEnv, migration.value);
+        for (const migration of inlineMigrations) {
+          if (Object.hasOwn(migration, 'value')) saveEnvKey(migration.tokenEnv, migration.value);
+        }
       }
       : null,
   });
@@ -1356,7 +1358,9 @@ function mutateProviders(fn, mutationOptions = {}) {
     ],
     afterWrite: inlineMigrations.length || requestedAfterWrite
       ? () => {
-        for (const migration of inlineMigrations) saveEnvKey(migration.tokenEnv, migration.value);
+        for (const migration of inlineMigrations) {
+          if (Object.hasOwn(migration, 'value')) saveEnvKey(migration.tokenEnv, migration.value);
+        }
         if (requestedAfterWrite) requestedAfterWrite();
       }
       : null,
@@ -1365,14 +1369,17 @@ function mutateProviders(fn, mutationOptions = {}) {
   return result;
 }
 
-function migrationTokenEnv(provider, providers) {
+function migrationTokenEnv(provider, providers, occupiedEnvNames) {
   const current = typeof provider.token_env === 'string' && ENV_NAME_RE.test(provider.token_env)
     ? provider.token_env
     : '';
   if (current && !providers.some((entry) => entry !== provider && entry?.token_env === current)) return current;
   const stem = String(provider.id || 'PROVIDER').toUpperCase().replace(/[^A-Z0-9_]/g, '_');
   const base = `CODEX_SWITCH_${/^[A-Z_]/.test(stem) ? stem : `_${stem}`}_API_KEY`;
-  const used = new Set(providers.map((entry) => entry?.token_env).filter((name) => typeof name === 'string'));
+  const used = new Set([
+    ...occupiedEnvNames,
+    ...providers.map((entry) => entry?.token_env).filter((name) => typeof name === 'string'),
+  ]);
   let candidate = base;
   let suffix = 1;
   while (used.has(candidate)) {
@@ -1383,14 +1390,27 @@ function migrationTokenEnv(provider, providers) {
 }
 
 function prepareLegacyInlineTokenMigrations(providers) {
+  const envFileEntries = readEnvFileEntries();
+  const occupiedEnvNames = new Set([...envFileEntries.keys(), ...Object.keys(process.env)]);
   const migrations = [];
   for (const provider of providers) {
     if (!Object.hasOwn(provider || {}, 'token')) continue;
-    const value = validateEnvKeyValue(provider.token);
-    const tokenEnv = migrationTokenEnv(provider, providers);
+    const inlineToken = provider.token;
+    const currentTokenEnv = typeof provider.token_env === 'string' && ENV_NAME_RE.test(provider.token_env)
+      ? provider.token_env
+      : '';
+    const hasCurrentEnvValue = currentTokenEnv && (
+      Boolean(process.env[currentTokenEnv]) || Boolean(envFileEntries.get(currentTokenEnv))
+    );
+    const tokenEnv = hasCurrentEnvValue
+      ? currentTokenEnv
+      : migrationTokenEnv(provider, providers, occupiedEnvNames);
     provider.token_env = tokenEnv;
     delete provider.token;
-    migrations.push({ providerId: String(provider.id || ''), tokenEnv, value });
+    occupiedEnvNames.add(tokenEnv);
+    const migration = { providerId: String(provider.id || ''), tokenEnv };
+    if (!hasCurrentEnvValue) migration.value = validateEnvKeyValue(inlineToken);
+    migrations.push(migration);
   }
   return migrations;
 }
