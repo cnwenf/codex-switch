@@ -7,6 +7,7 @@
 #
 # 用法:
 #   sh scripts/install-app.sh                 # 自动从最新 Release 下载
+#   sh scripts/install-app.sh --release-tag v0.5.0  # 锁定 tag 并等待受校验资产
 #   sh scripts/install-app.sh <DMG URL或本地路径>  # 覆盖来源(测试/离线用)
 #
 # 幂等:重复执行 = 覆盖升级到目标版本。安装前会停掉正在运行的旧实例。
@@ -14,46 +15,146 @@ set -e
 umask 077
 
 APP_NAME="Codex Switch"
-DEST="/Applications/$APP_NAME.app"
+DEST="${CODEX_SWITCH_INSTALL_DEST:-/Applications/$APP_NAME.app}"
 REPO="cnwenf/codex-switch"
-SRC="${1:-}"
+SRC=
+RELEASE_TAG=
 AUTO_RELEASE=false
 POLL_DELAYS="${CODEX_SWITCH_RELEASE_POLL_DELAYS:-5 10 20 40 80 120 180 240}"
+RELEASE_TIMEOUT_SECONDS="${CODEX_SWITCH_RELEASE_TIMEOUT_SECONDS:-900}"
 
 say() { printf '[install] %s\n' "$*"; }
 die() { printf '[install] %s\n' "$*" >&2; exit 1; }
 
+case "$#" in
+  0) ;;
+  1)
+    [ "$1" != "--release-tag" ] || die "--release-tag 需要一个 tag，例如 v0.5.0。"
+    case "$1" in --*) die "未知参数: $1" ;; esac
+    SRC=$1
+    ;;
+  2)
+    [ "$1" = "--release-tag" ] || die "用法: sh scripts/install-app.sh [--release-tag v0.5.0|DMG URL|本地路径]"
+    RELEASE_TAG=$2
+    ;;
+  *) die "用法: sh scripts/install-app.sh [--release-tag v0.5.0|DMG URL|本地路径]" ;;
+esac
+
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/codex-switch.XXXXXX" 2>/dev/null) || die "无法创建安全的临时目录。"
+trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
+
+remaining_seconds() {
+  remaining_now=$(date +%s) || return 1
+  case "$remaining_now" in ''|*[!0-9]*) return 1 ;; esac
+  remaining_value=$((RELEASE_DEADLINE_EPOCH - remaining_now))
+  [ "$remaining_value" -gt 0 ] || return 1
+  printf '%s' "$remaining_value"
+}
+
+metadata_curl() {
+  metadata_url=$1
+  metadata_output=$2
+  metadata_timeout=$3
+  metadata_resolve=${4:-}
+  : > "$metadata_output"
+  set +e
+  if [ -n "$metadata_resolve" ]; then
+    METADATA_HTTP_STATUS=$(curl -sSL --retry 2 --retry-delay 1 \
+      --retry-max-time "$metadata_timeout" --max-time "$metadata_timeout" \
+      --resolve "$metadata_resolve" -o "$metadata_output" \
+      --write-out '%{http_code}' "$metadata_url" 2>/dev/null)
+  else
+    METADATA_HTTP_STATUS=$(curl -sSL --retry 2 --retry-delay 1 \
+      --retry-max-time "$metadata_timeout" --max-time "$metadata_timeout" \
+      -o "$metadata_output" --write-out '%{http_code}' "$metadata_url" 2>/dev/null)
+  fi
+  METADATA_CURL_STATUS=$?
+  set -e
+}
+
 fetch_json() {
-  url=$1
-  curl -fsSL --retry 2 --max-time 20 "$url" 2>/dev/null \
-    || curl -fsSL --retry 2 --max-time 20 --resolve api.github.com:443:140.82.112.6 "$url" 2>/dev/null
+  fetch_url=$1
+  fetch_output=$2
+  fetch_remaining=$(remaining_seconds) || return 124
+  fetch_timeout=$fetch_remaining
+  [ "$fetch_timeout" -le 20 ] || fetch_timeout=20
+
+  metadata_curl "$fetch_url" "$fetch_output" "$fetch_timeout"
+  if [ "$METADATA_CURL_STATUS" -ne 0 ]; then
+    fetch_remaining=$(remaining_seconds) || return 124
+    fetch_timeout=$fetch_remaining
+    [ "$fetch_timeout" -le 20 ] || fetch_timeout=20
+    metadata_curl "$fetch_url" "$fetch_output" "$fetch_timeout" \
+      'api.github.com:443:140.82.112.6'
+  fi
+
+  [ "$METADATA_CURL_STATUS" -eq 0 ] || return 74
+  case "$METADATA_HTTP_STATUS" in
+    200) return 0 ;;
+    403|429) return 75 ;;
+    *) return 76 ;;
+  esac
 }
 
 download_file() {
   url=$1
   output=$2
-  curl -fL --retry 2 --max-time 600 --progress-bar -o "$output" "$url" \
+  curl -fL --retry 2 --retry-delay 1 --retry-max-time 600 --max-time 600 --progress-bar -o "$output" "$url" \
     || { say "直连失败,改用固定 IP 重试(DNS 受限网络)…";
-         curl -fL --retry 2 --max-time 600 --progress-bar --resolve github.com:443:140.82.112.3 -o "$output" "$url"; }
+         curl -fL --retry 2 --retry-delay 1 --retry-max-time 600 --max-time 600 --progress-bar --resolve github.com:443:140.82.112.3 -o "$output" "$url"; }
 }
 
 json_string_field() {
   field=$1
   json=$2
   printf '%s' "$json" \
-    | tr '\n' ' ' \
-    | grep -o "\"$field\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
-    | head -1 \
-    | sed 's/^[^:]*:[[:space:]]*"//; s/"$//'
+    | /usr/bin/plutil -extract "$field" raw -expect string -o - - 2>/dev/null
 }
 
 release_has_asset_pair() {
   json=$1
   dmg_name=$2
   checksum_name=$3
-  compact=$(printf '%s' "$json" | tr -d '[:space:]')
-  printf '%s' "$compact" | grep -Fq "\"name\":\"$dmg_name\"" \
-    && printf '%s' "$compact" | grep -Fq "\"name\":\"$checksum_name\""
+  asset_count=$(printf '%s' "$json" \
+    | /usr/bin/plutil -extract assets raw -expect array -o - - 2>/dev/null) || return 2
+  case "$asset_count" in ''|*[!0-9]*) return 2 ;; esac
+
+  dmg_matches=0
+  dmg_uploaded=0
+  checksum_matches=0
+  checksum_uploaded=0
+  asset_index=0
+  while [ "$asset_index" -lt "$asset_count" ]; do
+    asset_name=$(printf '%s' "$json" \
+      | /usr/bin/plutil -extract "assets.$asset_index.name" raw -expect string -o - - 2>/dev/null) || return 2
+    asset_state=$(printf '%s' "$json" \
+      | /usr/bin/plutil -extract "assets.$asset_index.state" raw -expect string -o - - 2>/dev/null) || return 2
+    case "$asset_name" in
+      "$dmg_name")
+        dmg_matches=$((dmg_matches + 1))
+        [ "$asset_state" != uploaded ] || dmg_uploaded=$((dmg_uploaded + 1))
+        ;;
+      "$checksum_name")
+        checksum_matches=$((checksum_matches + 1))
+        [ "$asset_state" != uploaded ] || checksum_uploaded=$((checksum_uploaded + 1))
+        ;;
+    esac
+    asset_index=$((asset_index + 1))
+  done
+
+  [ "$dmg_matches" -eq 1 ] \
+    && [ "$dmg_uploaded" -eq 1 ] \
+    && [ "$checksum_matches" -eq 1 ] \
+    && [ "$checksum_uploaded" -eq 1 ]
+}
+
+metadata_asset_pair_ready() {
+  release_has_asset_pair "$1" "$2" "$3" && asset_status=0 || asset_status=$?
+  case "$asset_status" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) die "Release 资产元数据无效，已停止安装: $RELEASE_URL" ;;
+  esac
 }
 
 urlencode() {
@@ -89,13 +190,38 @@ validate_poll_delays() {
   [ "$count" -gt 0 ] || die "CODEX_SWITCH_RELEASE_POLL_DELAYS 不能为空。"
 }
 
+start_release_deadline() {
+  case "$RELEASE_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*|0|0[0-9]*) die "CODEX_SWITCH_RELEASE_TIMEOUT_SECONDS 必须是 1 到 900 的整数秒。" ;;
+  esac
+  [ "${#RELEASE_TIMEOUT_SECONDS}" -le 3 ] \
+    && [ "$RELEASE_TIMEOUT_SECONDS" -le 900 ] \
+    || die "CODEX_SWITCH_RELEASE_TIMEOUT_SECONDS 必须是 1 到 900 的整数秒。"
+  RELEASE_START_EPOCH=$(date +%s) || die "无法读取系统时间，已停止安装。"
+  case "$RELEASE_START_EPOCH" in ''|*[!0-9]*) die "无法读取系统时间，已停止安装。" ;; esac
+  RELEASE_DEADLINE_EPOCH=$((RELEASE_START_EPOCH + RELEASE_TIMEOUT_SECONDS))
+}
+
 # ---------- 1. 定位 DMG ----------
 if [ -z "$SRC" ]; then
-  say "查询最新 Release…"
-  API="https://api.github.com/repos/$REPO/releases/latest"
-  LATEST=$(fetch_json "$API") \
-      || die "无法访问 api.github.com(网络或 DNS 问题)。可手动指定:sh scripts/install-app.sh <DMG URL或本地路径>"
-  TAG=$(json_string_field tag_name "$LATEST")
+  start_release_deadline
+  if [ -n "$RELEASE_TAG" ]; then
+    TAG=$RELEASE_TAG
+    say "使用指定 Release $TAG…"
+  else
+    say "查询最新 Release…"
+    API="https://api.github.com/repos/$REPO/releases/latest"
+    fetch_json "$API" "$WORK_DIR/latest.json" && latest_status=0 || latest_status=$?
+    case "$latest_status" in
+      0) ;;
+      75) die "GitHub API latest 查询受到限流；请在限制恢复后重跑安装命令。" ;;
+      124) die "查询 latest Release 已达到 ${RELEASE_TIMEOUT_SECONDS}s 安全时限；请稍后重跑安装命令。" ;;
+      *) die "无法读取 GitHub latest Release；请检查网络后重跑安装命令。" ;;
+    esac
+    LATEST=$(cat "$WORK_DIR/latest.json")
+    TAG=$(json_string_field tag_name "$LATEST") \
+      || die "latest Release 元数据无效，已停止安装。"
+  fi
   printf '%s' "$TAG" | grep -Eq '^v[0-9]+[0-9A-Za-z.+-]*$' \
     || die "latest Release 返回了无效 tag，已停止安装。"
 
@@ -112,34 +238,50 @@ if [ -z "$SRC" ]; then
 
   validate_poll_delays
   say "已锁定 Release ${TAG}；等待 $DMG_NAME 与 checksum…"
-  META=$(fetch_json "$TAG_API") \
-    || die "无法读取已锁定 Release: $RELEASE_URL"
   ready=false
-  if release_has_asset_pair "$META" "$DMG_NAME" "$CHECKSUM_NAME"; then
-    ready=true
-  else
+  fetch_json "$TAG_API" "$WORK_DIR/release.json" && metadata_status=0 || metadata_status=$?
+  case "$metadata_status" in
+    0)
+      META=$(cat "$WORK_DIR/release.json")
+      metadata_asset_pair_ready "$META" "$DMG_NAME" "$CHECKSUM_NAME" && ready=true || true
+      ;;
+    75) say "GitHub API 返回速率限制；将在安全时限内继续等待 ${TAG}…" ;;
+    124) ;;
+    *) die "无法读取已锁定 Release: $RELEASE_URL" ;;
+  esac
+
+  if [ "$ready" != true ]; then
     for delay in $POLL_DELAYS; do
-      say "DMG 与 checksum 尚未同时就绪；${delay}s 后重试 ${TAG}…"
-      sleep "$delay"
-      META=$(fetch_json "$TAG_API") \
-        || die "轮询已锁定 Release 失败: $RELEASE_URL"
-      if release_has_asset_pair "$META" "$DMG_NAME" "$CHECKSUM_NAME"; then
-        ready=true
-        break
-      fi
+      poll_remaining=$(remaining_seconds) || break
+      poll_wait=$delay
+      [ "$poll_wait" -le "$poll_remaining" ] || poll_wait=$poll_remaining
+      say "DMG 与 checksum 尚未同时就绪；${poll_wait}s 后重试 ${TAG}…"
+      sleep "$poll_wait"
+      remaining_seconds >/dev/null || break
+
+      fetch_json "$TAG_API" "$WORK_DIR/release.json" && metadata_status=0 || metadata_status=$?
+      case "$metadata_status" in
+        0)
+          META=$(cat "$WORK_DIR/release.json")
+          if metadata_asset_pair_ready "$META" "$DMG_NAME" "$CHECKSUM_NAME"; then
+            ready=true
+            break
+          fi
+          ;;
+        75) say "GitHub API 返回速率限制；将在安全时限内继续等待 ${TAG}…" ;;
+        124) break ;;
+        *) die "轮询已锁定 Release 失败: $RELEASE_URL" ;;
+      esac
     done
   fi
   if [ "$ready" != true ]; then
-    die "等待 Release 资产超时；GitHub Actions 可能仍在构建。Release: ${RELEASE_URL}；稍后重跑: sh scripts/install-app.sh '$SRC'"
+    die "等待 Release 资产超时；GitHub Actions 可能仍在构建。Release: ${RELEASE_URL}；稍后重跑: sh scripts/install-app.sh --release-tag '$TAG'"
   fi
   AUTO_RELEASE=true
 fi
 say "安装来源: $SRC"
 
 # ---------- 2. 下载到临时目录 ----------
-WORK_DIR=$(mktemp -d 2>/dev/null) || die "无法创建安全的临时目录。"
-trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
-
 if [ "$AUTO_RELEASE" = true ]; then
   DMG="$WORK_DIR/$DMG_NAME"
   CHECKSUM="$WORK_DIR/$CHECKSUM_NAME"

@@ -40,12 +40,12 @@ cp "$DL/node-$NODE_VERSION-darwin-arm64/bin/node" "$MACOS_DIR/node"
 chmod +x "$MACOS_DIR/node"
 
 # ---------- 3. 应用源码 + 生产依赖(不含 config.local.toml / 密钥文件) ----------
-cp package.json config.toml "$RES/app/"
+cp package.json package-lock.json config.toml "$RES/app/"
 mkdir -p "$RES/app/src"
 cp src/*.js "$RES/app/src/"
 # App 图标(assets/logo.svg → assets/app.icns,iconutil 编译产物)
 [ -f assets/app.icns ] && cp assets/app.icns "$RES/app.icns"
-( cd "$RES/app" && npm install --omit=dev --no-fund --no-audit --loglevel=error )
+( cd "$RES/app" && npm ci --omit=dev --ignore-scripts --no-fund --no-audit --loglevel=error )
 
 # ---------- 4. Info.plist ----------
 cat > "$APP/Contents/Info.plist" <<PLIST

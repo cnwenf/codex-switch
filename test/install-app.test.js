@@ -8,6 +8,7 @@ import test from 'node:test';
 
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const INSTALLER = path.join(REPO_ROOT, 'scripts', 'install-app.sh');
+const BUILD_SCRIPT = path.join(REPO_ROOT, 'scripts', 'build-macos-app.sh');
 const WORKFLOW = path.join(REPO_ROOT, '.github', 'workflows', 'release-dmg.yml');
 
 const ACTION_SHAS = {
@@ -35,7 +36,10 @@ test('release workflow pins the published or dispatched tag in a least-privilege
   assert.match(workflow, /test "\$\(uname -m\)" = arm64/);
   assert.match(workflow, new RegExp(`actions/checkout@${ACTION_SHAS.checkout}`));
   assert.match(workflow, /persist-credentials:\s*false/);
-  assert.match(workflow, /ref:\s*\$\{\{\s*steps\.release\.outputs\.tag\s*\}\}/);
+  assert.match(workflow, /ref:\s*refs\/tags\/\$\{\{\s*steps\.release\.outputs\.tag\s*\}\}/);
+  assert.match(workflow, /EXPECTED_TAG_COMMIT=\$\(git rev-list -n 1 "refs\/tags\/\$TAG"\)/);
+  assert.match(workflow, /ACTUAL_HEAD=\$\(git rev-parse HEAD\)/);
+  assert.match(workflow, /"\$ACTUAL_HEAD" != "\$EXPECTED_TAG_COMMIT"/);
   assert.match(workflow, new RegExp(`actions/setup-node@${ACTION_SHAS.setupNode}`));
   assert.match(workflow, /node-version:\s*["']?22\.23\.2["']?/);
   assert.match(workflow, /^\s*NODE_VERSION:\s*v22\.23\.2$/m);
@@ -78,7 +82,47 @@ test('release workflow publishes idempotently without overwriting a partial or d
   assert.match(workflow, /only one release asset exists/i);
 });
 
-function releaseJson(tag, assetNames = []) {
+test('macOS build stages the lockfile and installs production dependencies reproducibly', () => {
+  const buildScript = fs.readFileSync(BUILD_SCRIPT, 'utf8');
+
+  assert.match(buildScript, /cp package\.json package-lock\.json config\.toml "\$RES\/app\/"/);
+  assert.match(buildScript, /npm ci --omit=dev --ignore-scripts --no-fund --no-audit --loglevel=error/);
+  assert.doesNotMatch(buildScript, /npm install --omit=dev/);
+});
+
+test('installer rm and cp stubs never mutate fixtures or accept paths outside the fixture root', (t) => {
+  const fixture = createFixture(t);
+  const stubEnv = fixture.env;
+  const rmStub = path.join(fixture.root, 'bin', 'rm');
+  const cpStub = path.join(fixture.root, 'bin', 'cp');
+  const sentinel = path.join(fixture.root, 'sentinel');
+  const copied = path.join(fixture.root, 'copied');
+  fs.writeFileSync(sentinel, 'keep me');
+  assert.doesNotMatch(fs.readFileSync(rmStub, 'utf8'), /exec\s+\/bin\/rm/);
+  assert.doesNotMatch(fs.readFileSync(cpStub, 'utf8'), /exec\s+\/bin\/cp/);
+
+  const safeRm = spawnSync(rmStub, ['-rf', sentinel], { env: stubEnv, encoding: 'utf8' });
+  assert.equal(safeRm.status, 0, safeRm.stderr);
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'keep me');
+
+  const safeCp = spawnSync(cpStub, [sentinel, copied], { env: stubEnv, encoding: 'utf8' });
+  assert.equal(safeCp.status, 0, safeCp.stderr);
+  assert.equal(fs.existsSync(copied), false);
+
+  const rejectedRm = spawnSync(rmStub, ['-rf', '/Applications/Codex Switch.app'], {
+    env: stubEnv,
+    encoding: 'utf8',
+  });
+  assert.notEqual(rejectedRm.status, 0);
+
+  const rejectedCp = spawnSync(cpStub, ['-R', sentinel, '/Applications/Codex Switch.app'], {
+    env: stubEnv,
+    encoding: 'utf8',
+  });
+  assert.notEqual(rejectedCp.status, 0);
+});
+
+function releaseJson(tag, assets = []) {
   return JSON.stringify({
     url: `https://api.github.com/repos/cnwenf/codex-switch/releases/1`,
     html_url: `https://github.com/cnwenf/codex-switch/releases/tag/${tag}`,
@@ -90,14 +134,14 @@ function releaseJson(tag, assetNames = []) {
     prerelease: false,
     created_at: '2026-08-25T00:00:00Z',
     published_at: '2026-08-25T00:00:00Z',
-    assets: assetNames.map((name, index) => ({
+    assets: assets.map((asset, index) => ({
       url: `https://api.github.com/repos/cnwenf/codex-switch/releases/assets/${index + 1}`,
       id: index + 1,
-      name,
+      name: typeof asset === 'string' ? asset : asset.name,
       content_type: 'application/octet-stream',
-      state: 'uploaded',
+      state: typeof asset === 'string' ? 'uploaded' : asset.state,
       size: 12,
-      browser_download_url: `https://github.com/cnwenf/codex-switch/releases/download/${tag}/${name}`,
+      browser_download_url: `https://github.com/cnwenf/codex-switch/releases/download/${tag}/${typeof asset === 'string' ? asset : asset.name}`,
     })),
   });
 }
@@ -109,9 +153,14 @@ function writeExecutable(filename, source) {
 function createFixture(t, {
   tag = 'v0.5.0',
   tagResponses,
+  tagStatuses = [],
+  latestStatus = 200,
   dmgContents = 'fixture dmg bytes',
   checksumContents,
   pollDelays = '0 0 0',
+  timeoutSeconds = 900,
+  curlAdvanceSeconds = 0,
+  startEpoch = 1000,
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-installer-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -120,6 +169,7 @@ function createFixture(t, {
   const home = path.join(root, 'home');
   const tagDir = path.join(root, 'tag-responses');
   const mount = path.join(root, 'mounted volume');
+  const dest = path.join(root, 'Applications', 'Codex Switch.app');
   fs.mkdirSync(bin);
   fs.mkdirSync(home);
   fs.mkdirSync(tagDir);
@@ -137,25 +187,37 @@ function createFixture(t, {
   const responses = tagResponses ?? [releaseJson(tag, [dmgName, checksumName])];
   responses.forEach((response, index) => {
     fs.writeFileSync(path.join(tagDir, `${index + 1}.json`), response);
+    fs.writeFileSync(path.join(tagDir, `${index + 1}.status`), String(tagStatuses[index] ?? 200));
   });
   fs.writeFileSync(path.join(root, 'latest.json'), releaseJson(tag));
+  fs.writeFileSync(path.join(root, 'now'), String(startEpoch));
 
   writeExecutable(path.join(bin, 'curl'), String.raw`#!/bin/sh
 set -eu
 output=
+write_out=
 url=
+fail_on_http=false
+printf '%s\n' "$*" >> "$FAKE_CURL_ARGS_LOG"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) output=$2; shift 2 ;;
-    --retry|--max-time|--resolve) shift 2 ;;
+    -w|--write-out) write_out=$2; shift 2 ;;
+    --retry|--retry-delay|--retry-max-time|--max-time|--resolve) shift 2 ;;
+    -f|-f*) fail_on_http=true; shift ;;
     -*) shift ;;
     *) url=$1; shift ;;
   esac
 done
 printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
+now=$(/bin/cat "$FAKE_NOW_FILE")
+printf '%s\n' "$((now + FAKE_CURL_ADVANCE_SECONDS))" > "$FAKE_NOW_FILE"
+status=200
+body=
 case "$url" in
   */releases/latest)
-    /bin/cat "$FAKE_LATEST_JSON"
+    status=$FAKE_LATEST_STATUS
+    body=$FAKE_LATEST_JSON
     ;;
   */releases/tags/*)
     count=0
@@ -164,7 +226,8 @@ case "$url" in
     printf '%s\n' "$count" > "$FAKE_TAG_STATE"
     response="$FAKE_TAG_DIR/$count.json"
     [ -f "$response" ] || exit 22
-    /bin/cat "$response"
+    status=$(/bin/cat "$FAKE_TAG_DIR/$count.status")
+    body=$response
     ;;
   *.sha256)
     [ -n "$output" ]
@@ -178,6 +241,17 @@ case "$url" in
     exit 22
     ;;
 esac
+if [ -n "$body" ]; then
+  if [ -n "$output" ]; then
+    /bin/cp "$body" "$output"
+  else
+    /bin/cat "$body"
+  fi
+fi
+[ -z "$write_out" ] || printf '%s' "$status"
+if [ "$fail_on_http" = true ] && [ "$status" -ge 400 ]; then
+  exit 22
+fi
 `);
 
   writeExecutable(path.join(bin, 'hdiutil'), String.raw`#!/bin/sh
@@ -191,47 +265,81 @@ esac
 `);
 
   writeExecutable(path.join(bin, 'rm'), String.raw`#!/bin/sh
-case "$*" in
-  *"/Applications/Codex Switch.app"*)
-    printf '%s\n' "$*" >> "$FAKE_INSTALL_LOG"
-    exit 0
-    ;;
-esac
-exec /bin/rm "$@"
+set -eu
+[ -n "$FAKE_FIXTURE_ROOT" ] || exit 97
+is_install=false
+for operand in "$@"; do
+  case "$operand" in
+    -*) continue ;;
+    "$FAKE_FIXTURE_ROOT"|"$FAKE_FIXTURE_ROOT"/*) ;;
+    *) printf 'refusing rm outside fixture root: %s\n' "$operand" >&2; exit 97 ;;
+  esac
+  [ "$operand" != "$CODEX_SWITCH_INSTALL_DEST" ] || is_install=true
+done
+[ "$is_install" != true ] || printf '%s\n' "$*" >> "$FAKE_INSTALL_LOG"
+exit 0
 `);
 
   writeExecutable(path.join(bin, 'cp'), String.raw`#!/bin/sh
-case "$*" in
-  *"/Applications/Codex Switch.app"*)
-    printf '%s\n' "$*" >> "$FAKE_INSTALL_LOG"
-    exit 0
-    ;;
-esac
-exec /bin/cp "$@"
+set -eu
+[ -n "$FAKE_FIXTURE_ROOT" ] || exit 97
+is_install=false
+for operand in "$@"; do
+  case "$operand" in
+    -*) continue ;;
+    "$FAKE_FIXTURE_ROOT"|"$FAKE_FIXTURE_ROOT"/*) ;;
+    *) printf 'refusing cp outside fixture root: %s\n' "$operand" >&2; exit 97 ;;
+  esac
+  [ "$operand" != "$CODEX_SWITCH_INSTALL_DEST" ] || is_install=true
+done
+[ "$is_install" != true ] || printf '%s\n' "$*" >> "$FAKE_INSTALL_LOG"
+exit 0
 `);
 
   writeExecutable(path.join(bin, 'open'), String.raw`#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_OPEN_LOG"
 `);
   writeExecutable(path.join(bin, 'xattr'), '#!/bin/sh\nexit 0\n');
-  writeExecutable(path.join(bin, 'sleep'), '#!/bin/sh\nexit 0\n');
+  writeExecutable(path.join(bin, 'date'), String.raw`#!/bin/sh
+set -eu
+[ "$#" -eq 1 ] && [ "$1" = +%s ] || exit 2
+/bin/cat "$FAKE_NOW_FILE"
+`);
+  writeExecutable(path.join(bin, 'sleep'), String.raw`#!/bin/sh
+set -eu
+case "$1" in ''|*[!0-9]*) exit 2 ;; esac
+now=$(/bin/cat "$FAKE_NOW_FILE")
+printf '%s\n' "$((now + $1))" > "$FAKE_NOW_FILE"
+printf '%s\n' "$1" >> "$FAKE_SLEEP_LOG"
+`);
 
   const logs = {
     curl: path.join(root, 'curl.log'),
+    curlArgs: path.join(root, 'curl-args.log'),
     hdiutil: path.join(root, 'hdiutil.log'),
     install: path.join(root, 'install.log'),
     open: path.join(root, 'open.log'),
+    sleep: path.join(root, 'sleep.log'),
   };
   const env = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
     HOME: home,
+    TMPDIR: root,
+    CODEX_SWITCH_INSTALL_DEST: dest,
     CODEX_SWITCH_RELEASE_POLL_DELAYS: pollDelays,
+    CODEX_SWITCH_RELEASE_TIMEOUT_SECONDS: String(timeoutSeconds),
+    FAKE_FIXTURE_ROOT: root,
     FAKE_CURL_LOG: logs.curl,
+    FAKE_CURL_ARGS_LOG: logs.curlArgs,
+    FAKE_CURL_ADVANCE_SECONDS: String(curlAdvanceSeconds),
     FAKE_HDIUTIL_LOG: logs.hdiutil,
     FAKE_INSTALL_LOG: logs.install,
     FAKE_OPEN_LOG: logs.open,
+    FAKE_SLEEP_LOG: logs.sleep,
+    FAKE_NOW_FILE: path.join(root, 'now'),
     FAKE_LATEST_JSON: path.join(root, 'latest.json'),
+    FAKE_LATEST_STATUS: String(latestStatus),
     FAKE_TAG_STATE: path.join(root, 'tag-state'),
     FAKE_TAG_DIR: tagDir,
     FAKE_DMG: dmg,
@@ -239,12 +347,13 @@ printf '%s\n' "$*" >> "$FAKE_OPEN_LOG"
     FAKE_MOUNT: mount,
   };
 
-  return { root, env, logs, tag, dmgName, checksumName, dmg };
+  return { root, dest, env, logs, tag, dmgName, checksumName, dmg, nowFile: path.join(root, 'now') };
 }
 
 function runInstaller(fixture, source) {
   const args = [INSTALLER];
-  if (source !== undefined) args.push(source);
+  if (Array.isArray(source)) args.push(...source);
+  else if (source !== undefined) args.push(source);
   return spawnSync('sh', args, {
     cwd: REPO_ROOT,
     env: fixture.env,
@@ -272,7 +381,7 @@ test('latest install freezes one tag and downloads the exact DMG/checksum pair',
     'https://github.com/cnwenf/codex-switch/releases/download/v0.5.0%2Bbuild.1/CodexSwitch-0.5.0%2Bbuild.1-macos-arm64.dmg.sha256',
   ]);
   assert.match(result.stdout, /SHA-256 校验通过/);
-  assert.match(readLog(fixture.logs.open).join('\n'), /\/Applications\/Codex Switch\.app/);
+  assert.match(readLog(fixture.logs.open).join('\n'), new RegExp(fixture.dest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
 test('latest install polls only the frozen tag until both assets are present', (t) => {
@@ -298,6 +407,80 @@ test('latest install polls only the frozen tag until both assets are present', (
   assert.match(result.stdout, /DMG 与 checksum 尚未同时就绪/);
 });
 
+test('release title and body cannot impersonate a missing uploaded DMG asset', (t) => {
+  const tag = 'v0.5.0';
+  const dmgName = 'CodexSwitch-0.5.0-macos-arm64.dmg';
+  const checksumName = `${dmgName}.sha256`;
+  const metadata = JSON.parse(releaseJson(tag, [checksumName]));
+  metadata.name = dmgName;
+  metadata.body = `pending ${dmgName} and ${checksumName}`;
+  const response = JSON.stringify(metadata);
+  const fixture = createFixture(t, {
+    tag,
+    tagResponses: [response, response],
+    pollDelays: '0',
+  });
+
+  const result = runInstaller(fixture, ['--release-tag', tag]);
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
+});
+
+test('starter assets are not treated as uploaded release assets', (t) => {
+  const tag = 'v0.5.0';
+  const dmgName = 'CodexSwitch-0.5.0-macos-arm64.dmg';
+  const checksumName = `${dmgName}.sha256`;
+  const response = releaseJson(tag, [
+    { name: dmgName, state: 'starter' },
+    { name: checksumName, state: 'starter' },
+  ]);
+  const fixture = createFixture(t, {
+    tag,
+    tagResponses: [response, response],
+    pollDelays: '0',
+  });
+
+  const result = runInstaller(fixture, ['--release-tag', tag]);
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
+});
+
+test('duplicate exact-name assets fail closed instead of selecting one arbitrarily', (t) => {
+  const tag = 'v0.5.0';
+  const dmgName = 'CodexSwitch-0.5.0-macos-arm64.dmg';
+  const checksumName = `${dmgName}.sha256`;
+  const response = releaseJson(tag, [dmgName, dmgName, checksumName]);
+  const fixture = createFixture(t, {
+    tag,
+    tagResponses: [response, response],
+    pollDelays: '0',
+  });
+
+  const result = runInstaller(fixture, ['--release-tag', tag]);
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
+});
+
+test('malformed release assets metadata fails closed with a clear error', (t) => {
+  const tag = 'v0.5.0';
+  const metadata = JSON.parse(releaseJson(tag));
+  metadata.assets = { name: 'not-an-array' };
+  const fixture = createFixture(t, {
+    tag,
+    tagResponses: [JSON.stringify(metadata)],
+    pollDelays: '0',
+  });
+
+  const result = runInstaller(fixture, ['--release-tag', tag]);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Release 资产元数据无效/);
+  assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
+});
+
 test('latest install times out with the frozen release URL and rerun command', (t) => {
   const tag = 'v0.5.0';
   const fixture = createFixture(t, {
@@ -311,8 +494,23 @@ test('latest install times out with the frozen release URL and rerun command', (
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /GitHub Actions 可能仍在构建/);
   assert.match(result.stderr, /https:\/\/github\.com\/cnwenf\/codex-switch\/releases\/tag\/v0\.5\.0/);
-  assert.match(result.stderr, /sh scripts\/install-app\.sh .*CodexSwitch-0\.5\.0-macos-arm64\.dmg/);
+  assert.match(result.stderr, /sh scripts\/install-app\.sh --release-tag 'v0\.5\.0'/);
+  assert.doesNotMatch(result.stderr, /releases\/download/);
   assert.equal(readLog(fixture.logs.install).length, 0);
+});
+
+test('an exact release tag bypasses latest but still waits for and verifies the asset pair', (t) => {
+  const fixture = createFixture(t, { tag: 'v0.5.0+build.1' });
+
+  const result = runInstaller(fixture, ['--release-tag', fixture.tag]);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(readLog(fixture.logs.curl), [
+    'https://api.github.com/repos/cnwenf/codex-switch/releases/tags/v0.5.0%2Bbuild.1',
+    'https://github.com/cnwenf/codex-switch/releases/download/v0.5.0%2Bbuild.1/CodexSwitch-0.5.0%2Bbuild.1-macos-arm64.dmg',
+    'https://github.com/cnwenf/codex-switch/releases/download/v0.5.0%2Bbuild.1/CodexSwitch-0.5.0%2Bbuild.1-macos-arm64.dmg.sha256',
+  ]);
+  assert.match(result.stdout, /SHA-256 校验通过/);
 });
 
 test('latest install rejects a configured polling window over fifteen minutes', (t) => {
@@ -331,6 +529,58 @@ test('latest install rejects a configured polling window over fifteen minutes', 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /轮询总时长不能超过 900 秒/);
   assert.equal(readLog(fixture.logs.install).length, 0);
+});
+
+test('release polling enforces a real wall-clock deadline and caps every API curl to remaining time', (t) => {
+  const tag = 'v0.5.0';
+  const empty = releaseJson(tag);
+  const fixture = createFixture(t, {
+    tag,
+    tagResponses: [empty, empty, empty, empty],
+    pollDelays: '4 4 4',
+    timeoutSeconds: 5,
+    curlAdvanceSeconds: 2,
+    startEpoch: 1000,
+  });
+
+  const result = runInstaller(fixture);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /等待 Release 资产超时/);
+  assert.equal(Number(fs.readFileSync(fixture.nowFile, 'utf8')), 1005);
+  const apiArgs = readLog(fixture.logs.curlArgs).filter((line) => line.includes('api.github.com'));
+  assert.deepEqual(apiArgs.map((line) => Number(line.match(/--max-time ([0-9]+)/)?.[1])), [5, 3]);
+  for (const args of apiArgs) {
+    assert.match(args, /--retry-max-time [1-5](?:\s|$)/);
+    assert.match(args, /--retry-delay 1(?:\s|$)/);
+  }
+  assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
+});
+
+test('GitHub 429 and 403 rate limits retry only inside the frozen-tag deadline', (t) => {
+  const tag = 'v0.5.0';
+  const dmgName = 'CodexSwitch-0.5.0-macos-arm64.dmg';
+  const checksumName = `${dmgName}.sha256`;
+  const fixture = createFixture(t, {
+    tag,
+    tagResponses: [
+      releaseJson(tag),
+      releaseJson(tag),
+      releaseJson(tag, [dmgName, checksumName]),
+    ],
+    tagStatuses: [429, 403, 200],
+    pollDelays: '1 1 1',
+    timeoutSeconds: 30,
+  });
+
+  const result = runInstaller(fixture, ['--release-tag', tag]);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /GitHub API.*(?:限流|速率限制)/);
+  assert.equal(readLog(fixture.logs.curl).filter((url) => url.includes('/releases/tags/')).length, 3);
+  const tagArgs = readLog(fixture.logs.curlArgs).filter((line) => line.includes('/releases/tags/'));
+  assert.equal(tagArgs.every((line) => /--retry-max-time [0-9]+/.test(line)), true);
+  assert.match(result.stdout, /SHA-256 校验通过/);
 });
 
 test('latest install fails closed before mounting when checksum content differs', (t) => {
@@ -388,6 +638,6 @@ test('a local DMG bypasses curl and preserves the installation/launch path', (t)
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.equal(readLog(fixture.logs.curl).length, 0);
-  assert.match(readLog(fixture.logs.install).join('\n'), /\/Applications\/Codex Switch\.app/);
-  assert.match(readLog(fixture.logs.open).join('\n'), /\/Applications\/Codex Switch\.app/);
+  assert.match(readLog(fixture.logs.install).join('\n'), new RegExp(fixture.dest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(readLog(fixture.logs.open).join('\n'), new RegExp(fixture.dest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });

@@ -71,7 +71,7 @@ jobs:
       - name: Check out exact release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ steps.release.outputs.tag }}
+          ref: refs/tags/${{ steps.release.outputs.tag }}
           persist-credentials: false
 
       - name: Set up Node.js
@@ -88,6 +88,13 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
+          EXPECTED_TAG_COMMIT=$(git rev-list -n 1 "refs/tags/$TAG")
+          ACTUAL_HEAD=$(git rev-parse HEAD)
+          if [[ -z "$EXPECTED_TAG_COMMIT" || "$ACTUAL_HEAD" != "$EXPECTED_TAG_COMMIT" ]]; then
+            echo "::error::checked out HEAD $ACTUAL_HEAD does not match peeled tag commit $EXPECTED_TAG_COMMIT"
+            exit 1
+          fi
+
           VERSION=$(node -p 'require("./package.json").version')
           if [[ "$TAG" != "v${VERSION}" ]]; then
             echo "::error::release tag $TAG does not match package version v${VERSION}"
