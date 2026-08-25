@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,6 +90,14 @@ test('macOS build stages the lockfile and installs production dependencies repro
   assert.doesNotMatch(buildScript, /npm install --omit=dev/);
 });
 
+test('installer JSON parsing uses only macOS 11 plist interfaces', () => {
+  const installer = fs.readFileSync(INSTALLER, 'utf8');
+
+  assert.match(installer, /\/usr\/bin\/plutil -convert xml1/);
+  assert.match(installer, /\/usr\/libexec\/PlistBuddy/);
+  assert.doesNotMatch(installer, /\braw\b|-expect/);
+});
+
 test('installer rm and cp stubs never mutate fixtures or accept paths outside the fixture root', (t) => {
   const fixture = createFixture(t);
   const stubEnv = fixture.env;
@@ -141,7 +149,9 @@ function releaseJson(tag, assets = []) {
       content_type: 'application/octet-stream',
       state: typeof asset === 'string' ? 'uploaded' : asset.state,
       size: 12,
-      browser_download_url: `https://github.com/cnwenf/codex-switch/releases/download/${tag}/${typeof asset === 'string' ? asset : asset.name}`,
+      browser_download_url: typeof asset === 'string'
+        ? `https://github.com/cnwenf/codex-switch/releases/download/${tag}/${asset}`
+        : asset.browser_download_url ?? `https://github.com/cnwenf/codex-switch/releases/download/${tag}/${asset.name}`,
     })),
   });
 }
@@ -154,13 +164,17 @@ function createFixture(t, {
   tag = 'v0.5.0',
   tagResponses,
   tagStatuses = [],
+  tagCurlExitStatuses = [],
   latestStatus = 200,
+  latestResponse,
   dmgContents = 'fixture dmg bytes',
   checksumContents,
   pollDelays = '0 0 0',
   timeoutSeconds = 900,
   curlAdvanceSeconds = 0,
   startEpoch = 1000,
+  useRealCurl = false,
+  useRealClock = false,
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-installer-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -188,11 +202,12 @@ function createFixture(t, {
   responses.forEach((response, index) => {
     fs.writeFileSync(path.join(tagDir, `${index + 1}.json`), response);
     fs.writeFileSync(path.join(tagDir, `${index + 1}.status`), String(tagStatuses[index] ?? 200));
+    fs.writeFileSync(path.join(tagDir, `${index + 1}.exit`), String(tagCurlExitStatuses[index] ?? 0));
   });
-  fs.writeFileSync(path.join(root, 'latest.json'), releaseJson(tag));
+  fs.writeFileSync(path.join(root, 'latest.json'), latestResponse ?? releaseJson(tag));
   fs.writeFileSync(path.join(root, 'now'), String(startEpoch));
 
-  writeExecutable(path.join(bin, 'curl'), String.raw`#!/bin/sh
+  if (!useRealCurl) writeExecutable(path.join(bin, 'curl'), String.raw`#!/bin/sh
 set -eu
 output=
 write_out=
@@ -203,7 +218,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) output=$2; shift 2 ;;
     -w|--write-out) write_out=$2; shift 2 ;;
-    --retry|--retry-delay|--retry-max-time|--max-time|--resolve) shift 2 ;;
+    --retry|--retry-delay|--retry-max-time|--max-time|--connect-timeout|--resolve) shift 2 ;;
     -f|-f*) fail_on_http=true; shift ;;
     -*) shift ;;
     *) url=$1; shift ;;
@@ -213,6 +228,7 @@ printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
 now=$(/bin/cat "$FAKE_NOW_FILE")
 printf '%s\n' "$((now + FAKE_CURL_ADVANCE_SECONDS))" > "$FAKE_NOW_FILE"
 status=200
+curl_exit=0
 body=
 case "$url" in
   */releases/latest)
@@ -227,6 +243,7 @@ case "$url" in
     response="$FAKE_TAG_DIR/$count.json"
     [ -f "$response" ] || exit 22
     status=$(/bin/cat "$FAKE_TAG_DIR/$count.status")
+    curl_exit=$(/bin/cat "$FAKE_TAG_DIR/$count.exit")
     body=$response
     ;;
   *.sha256)
@@ -249,6 +266,7 @@ if [ -n "$body" ]; then
   fi
 fi
 [ -z "$write_out" ] || printf '%s' "$status"
+[ "$curl_exit" -eq 0 ] || exit "$curl_exit"
 if [ "$fail_on_http" = true ] && [ "$status" -ge 400 ]; then
   exit 22
 fi
@@ -300,12 +318,12 @@ exit 0
 printf '%s\n' "$*" >> "$FAKE_OPEN_LOG"
 `);
   writeExecutable(path.join(bin, 'xattr'), '#!/bin/sh\nexit 0\n');
-  writeExecutable(path.join(bin, 'date'), String.raw`#!/bin/sh
+  if (!useRealClock) writeExecutable(path.join(bin, 'date'), String.raw`#!/bin/sh
 set -eu
 [ "$#" -eq 1 ] && [ "$1" = +%s ] || exit 2
 /bin/cat "$FAKE_NOW_FILE"
 `);
-  writeExecutable(path.join(bin, 'sleep'), String.raw`#!/bin/sh
+  if (!useRealClock) writeExecutable(path.join(bin, 'sleep'), String.raw`#!/bin/sh
 set -eu
 case "$1" in ''|*[!0-9]*) exit 2 ;; esac
 now=$(/bin/cat "$FAKE_NOW_FILE")
@@ -347,7 +365,7 @@ printf '%s\n' "$1" >> "$FAKE_SLEEP_LOG"
     FAKE_MOUNT: mount,
   };
 
-  return { root, dest, env, logs, tag, dmgName, checksumName, dmg, nowFile: path.join(root, 'now') };
+  return { root, bin, dest, env, logs, tag, dmgName, checksumName, dmg, nowFile: path.join(root, 'now') };
 }
 
 function runInstaller(fixture, source) {
@@ -365,6 +383,105 @@ function runInstaller(fixture, source) {
 function readLog(filename) {
   if (!fs.existsSync(filename)) return [];
   return fs.readFileSync(filename, 'utf8').trim().split('\n').filter(Boolean);
+}
+
+async function startDeadlineHttpServer(t, root) {
+  const serverFile = path.join(root, 'deadline-server.cjs');
+  const requestLog = path.join(root, 'http-requests.log');
+  fs.writeFileSync(serverFile, String.raw`const fs = require('node:fs');
+const http = require('node:http');
+
+const requestLog = process.argv[2];
+let requests = 0;
+const server = http.createServer((_request, response) => {
+  requests += 1;
+  fs.appendFileSync(requestLog, Date.now() + '\n');
+  if (requests === 1) {
+    response.writeHead(429, { 'Content-Type': 'application/json', Connection: 'close' });
+    response.end('{"message":"rate limited"}');
+    return;
+  }
+  response.writeHead(200, { 'Content-Type': 'application/json' });
+  response.write('{"assets":[');
+});
+
+server.listen(0, '127.0.0.1', () => {
+  process.stdout.write('READY ' + server.address().port + '\n');
+});
+`);
+
+  const child = spawn(process.execPath, [serverFile, requestLog], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  t.after(() => child.kill('SIGKILL'));
+
+  return await new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`local HTTP fixture did not start: ${stderr}`));
+    }, 3000);
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      const match = stdout.match(/READY ([0-9]+)/);
+      if (!match) return;
+      clearTimeout(timer);
+      resolve({ apiBase: `http://127.0.0.1:${match[1]}`, requestLog });
+    });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`local HTTP fixture exited ${code}: ${stderr}`));
+    });
+  });
+}
+
+function installRealCurlProxy(fixture, apiBase) {
+  writeExecutable(path.join(fixture.bin, 'curl'), String.raw`#!/bin/sh
+set -eu
+output=
+write_out=
+max_time=
+connect_timeout=
+retry=
+retry_delay=
+retry_max_time=
+url=
+printf '%s\n' "$*" >> "$FAKE_CURL_ARGS_LOG"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) output=$2; shift 2 ;;
+    -w|--write-out) write_out=$2; shift 2 ;;
+    --max-time) max_time=$2; shift 2 ;;
+    --connect-timeout) connect_timeout=$2; shift 2 ;;
+    --retry) retry=$2; shift 2 ;;
+    --retry-delay) retry_delay=$2; shift 2 ;;
+    --retry-max-time) retry_max_time=$2; shift 2 ;;
+    --resolve) shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+case "$url" in
+  https://api.github.com/*)
+    suffix=$(printf '%s' "$url" | /usr/bin/sed 's#^https://api.github.com##')
+    url="$REAL_HTTP_API_BASE$suffix"
+    ;;
+  *) exit 97 ;;
+esac
+set -- /usr/bin/curl -sSL
+[ -z "$max_time" ] || set -- "$@" --max-time "$max_time"
+[ -z "$connect_timeout" ] || set -- "$@" --connect-timeout "$connect_timeout"
+[ -z "$retry" ] || set -- "$@" --retry "$retry"
+[ -z "$retry_delay" ] || set -- "$@" --retry-delay "$retry_delay"
+[ -z "$retry_max_time" ] || set -- "$@" --retry-max-time "$retry_max_time"
+[ -z "$output" ] || set -- "$@" -o "$output"
+[ -z "$write_out" ] || set -- "$@" --write-out "$write_out"
+set -- "$@" "$url"
+exec "$@"
+`);
+  fixture.env.REAL_HTTP_API_BASE = apiBase;
 }
 
 test('latest install freezes one tag and downloads the exact DMG/checksum pair', (t) => {
@@ -481,6 +598,52 @@ test('malformed release assets metadata fails closed with a clear error', (t) =>
   assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
 });
 
+test('release asset fields are compared byte-for-byte without trimming control bytes', async (t) => {
+  const tag = 'v0.5.0';
+  const dmgName = 'CodexSwitch-0.5.0-macos-arm64.dmg';
+  const checksumName = `${dmgName}.sha256`;
+  const dmgUrl = `https://github.com/cnwenf/codex-switch/releases/download/${tag}/${dmgName}`;
+  const cases = [
+    ['name trailing LF', { name: `${dmgName}\n`, state: 'uploaded', browser_download_url: dmgUrl }],
+    ['name trailing CR', { name: `${dmgName}\r`, state: 'uploaded', browser_download_url: dmgUrl }],
+    ['name embedded NUL', { name: `${dmgName}\0`, state: 'uploaded', browser_download_url: dmgUrl }],
+    ['state trailing LF', { name: dmgName, state: 'uploaded\n', browser_download_url: dmgUrl }],
+    ['download URL trailing LF', { name: dmgName, state: 'uploaded', browser_download_url: `${dmgUrl}\n` }],
+    ['different download URL', { name: dmgName, state: 'uploaded', browser_download_url: 'https://example.test/other.dmg' }],
+  ];
+
+  for (const [label, maliciousDmg] of cases) {
+    await t.test(label, (subtest) => {
+      const response = releaseJson(tag, [maliciousDmg, checksumName]);
+      const fixture = createFixture(subtest, {
+        tag,
+        tagResponses: [response, response],
+        pollDelays: '0',
+      });
+
+      const result = runInstaller(fixture, ['--release-tag', tag]);
+
+      assert.notEqual(result.status, 0);
+      assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
+      assert.equal(readLog(fixture.logs.hdiutil).length, 0);
+    });
+  }
+});
+
+test('a newline-bearing latest tag cannot be trimmed into a trusted download URL', (t) => {
+  const tag = 'v0.5.0';
+  const fixture = createFixture(t, {
+    tag,
+    latestResponse: releaseJson(`${tag}\n`),
+  });
+
+  const result = runInstaller(fixture);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /无效 tag|元数据无效/);
+  assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
+});
+
 test('latest install times out with the frozen release URL and rerun command', (t) => {
   const tag = 'v0.5.0';
   const fixture = createFixture(t, {
@@ -500,7 +663,24 @@ test('latest install times out with the frozen release URL and rerun command', (
 });
 
 test('an exact release tag bypasses latest but still waits for and verifies the asset pair', (t) => {
-  const fixture = createFixture(t, { tag: 'v0.5.0+build.1' });
+  const tag = 'v0.5.0+build.1';
+  const dmgName = 'CodexSwitch-0.5.0+build.1-macos-arm64.dmg';
+  const checksumName = `${dmgName}.sha256`;
+  const metadata = JSON.parse(releaseJson(tag, [
+    {
+      name: '工具-预览.dmg',
+      state: 'uploaded',
+      browser_download_url: 'https://github.com/cnwenf/codex-switch/releases/download/v0.5.0%2Bbuild.1/%E5%B7%A5%E5%85%B7.dmg',
+    },
+    dmgName,
+    checksumName,
+  ]));
+  metadata.name = '构建版本 🧪';
+  metadata.body = '正常 Unicode 元数据不影响精确资产匹配。';
+  const fixture = createFixture(t, {
+    tag,
+    tagResponses: [JSON.stringify(metadata)],
+  });
 
   const result = runInstaller(fixture, ['--release-tag', fixture.tag]);
 
@@ -551,10 +731,34 @@ test('release polling enforces a real wall-clock deadline and caps every API cur
   const apiArgs = readLog(fixture.logs.curlArgs).filter((line) => line.includes('api.github.com'));
   assert.deepEqual(apiArgs.map((line) => Number(line.match(/--max-time ([0-9]+)/)?.[1])), [5, 3]);
   for (const args of apiArgs) {
-    assert.match(args, /--retry-max-time [1-5](?:\s|$)/);
-    assert.match(args, /--retry-delay 1(?:\s|$)/);
+    const maxTime = Number(args.match(/--max-time ([0-9]+)/)?.[1]);
+    assert.equal(Number(args.match(/--connect-timeout ([0-9]+)/)?.[1]), maxTime);
+    assert.doesNotMatch(args, /--retry(?:[ -]|$)/);
   }
   assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
+});
+
+test('real metadata curl retries outside curl and cannot exceed a two-second wall-clock deadline', async (t) => {
+  const fixture = createFixture(t, {
+    pollDelays: '0 0',
+    timeoutSeconds: 2,
+    useRealCurl: true,
+    useRealClock: true,
+  });
+  const server = await startDeadlineHttpServer(t, fixture.root);
+  installRealCurlProxy(fixture, server.apiBase);
+
+  const startedAt = performance.now();
+  const result = runInstaller(fixture, ['--release-tag', fixture.tag]);
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /等待 Release 资产超时/);
+  assert.ok(elapsedMs >= 1500, `curl did not exercise the blocking response: ${elapsedMs}ms`);
+  assert.ok(elapsedMs < 3200, `two-second deadline overran: ${elapsedMs}ms`);
+  const requestTimes = readLog(server.requestLog).map(Number);
+  assert.equal(requestTimes.length, 2);
+  assert.ok(requestTimes[1] - requestTimes[0] < 900, `curl retried internally after ${requestTimes[1] - requestTimes[0]}ms`);
 });
 
 test('GitHub 429 and 403 rate limits retry only inside the frozen-tag deadline', (t) => {
@@ -579,7 +783,34 @@ test('GitHub 429 and 403 rate limits retry only inside the frozen-tag deadline',
   assert.match(result.stdout, /GitHub API.*(?:限流|速率限制)/);
   assert.equal(readLog(fixture.logs.curl).filter((url) => url.includes('/releases/tags/')).length, 3);
   const tagArgs = readLog(fixture.logs.curlArgs).filter((line) => line.includes('/releases/tags/'));
-  assert.equal(tagArgs.every((line) => /--retry-max-time [0-9]+/.test(line)), true);
+  assert.equal(tagArgs.every((line) => !/--retry(?:[ -]|$)/.test(line)), true);
+  assert.match(result.stdout, /SHA-256 校验通过/);
+});
+
+test('tag metadata DNS and HTTP failures retry only in the outer frozen-tag loop', (t) => {
+  const tag = 'v0.5.0';
+  const dmgName = 'CodexSwitch-0.5.0-macos-arm64.dmg';
+  const checksumName = `${dmgName}.sha256`;
+  const fixture = createFixture(t, {
+    tag,
+    tagResponses: [
+      releaseJson(tag),
+      releaseJson(tag),
+      releaseJson(tag, [dmgName, checksumName]),
+    ],
+    tagStatuses: [0, 500, 200],
+    tagCurlExitStatuses: [6, 0, 0],
+    pollDelays: '0 0 0',
+    timeoutSeconds: 30,
+  });
+
+  const result = runInstaller(fixture, ['--release-tag', tag]);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /GitHub API 暂时不可用/);
+  assert.equal(readLog(fixture.logs.curl).filter((url) => url.includes('/releases/tags/')).length, 3);
+  const tagArgs = readLog(fixture.logs.curlArgs).filter((line) => line.includes('/releases/tags/'));
+  assert.equal(tagArgs.every((line) => !/--retry(?:[ -]|$)/.test(line)), true);
   assert.match(result.stdout, /SHA-256 校验通过/);
 });
 

@@ -55,19 +55,11 @@ metadata_curl() {
   metadata_url=$1
   metadata_output=$2
   metadata_timeout=$3
-  metadata_resolve=${4:-}
   : > "$metadata_output"
   set +e
-  if [ -n "$metadata_resolve" ]; then
-    METADATA_HTTP_STATUS=$(curl -sSL --retry 2 --retry-delay 1 \
-      --retry-max-time "$metadata_timeout" --max-time "$metadata_timeout" \
-      --resolve "$metadata_resolve" -o "$metadata_output" \
-      --write-out '%{http_code}' "$metadata_url" 2>/dev/null)
-  else
-    METADATA_HTTP_STATUS=$(curl -sSL --retry 2 --retry-delay 1 \
-      --retry-max-time "$metadata_timeout" --max-time "$metadata_timeout" \
-      -o "$metadata_output" --write-out '%{http_code}' "$metadata_url" 2>/dev/null)
-  fi
+  METADATA_HTTP_STATUS=$(curl -sSL \
+    --max-time "$metadata_timeout" --connect-timeout "$metadata_timeout" \
+    -o "$metadata_output" --write-out '%{http_code}' "$metadata_url" 2>/dev/null)
   METADATA_CURL_STATUS=$?
   set -e
 }
@@ -80,14 +72,7 @@ fetch_json() {
   [ "$fetch_timeout" -le 20 ] || fetch_timeout=20
 
   metadata_curl "$fetch_url" "$fetch_output" "$fetch_timeout"
-  if [ "$METADATA_CURL_STATUS" -ne 0 ]; then
-    fetch_remaining=$(remaining_seconds) || return 124
-    fetch_timeout=$fetch_remaining
-    [ "$fetch_timeout" -le 20 ] || fetch_timeout=20
-    metadata_curl "$fetch_url" "$fetch_output" "$fetch_timeout" \
-      'api.github.com:443:140.82.112.6'
-  fi
-
+  remaining_seconds >/dev/null || return 124
   [ "$METADATA_CURL_STATUS" -eq 0 ] || return 74
   case "$METADATA_HTTP_STATUS" in
     200) return 0 ;;
@@ -104,41 +89,121 @@ download_file() {
          curl -fL --retry 2 --retry-delay 1 --retry-max-time 600 --max-time 600 --progress-bar --resolve github.com:443:140.82.112.3 -o "$output" "$url"; }
 }
 
-json_string_field() {
-  field=$1
-  json=$2
-  printf '%s' "$json" \
-    | /usr/bin/plutil -extract "$field" raw -expect string -o - - 2>/dev/null
+json_to_plist() {
+  json_input=$1
+  plist_output=$2
+  /usr/bin/plutil -convert xml1 -o "$plist_output" "$json_input" >/dev/null 2>&1
+}
+
+file_is_single_line_text() {
+  text_file=$1
+  LC_ALL=C /usr/bin/od -An -tu1 "$text_file" \
+    | /usr/bin/awk '
+      {
+        for (i = 1; i <= NF; i++) {
+          byte = $i + 0
+          bytes++
+          last = byte
+          if (byte == 10) newlines++
+          else if (byte < 32 || byte == 127) invalid = 1
+        }
+      }
+      END { exit !(bytes > 1 && newlines == 1 && last == 10 && invalid != 1) }
+    '
+}
+
+file_is_valid_tag() {
+  tag_file=$1
+  LC_ALL=C /usr/bin/od -An -tu1 "$tag_file" \
+    | /usr/bin/awk '
+      {
+        for (i = 1; i <= NF; i++) {
+          byte = $i + 0
+          bytes++
+          last = byte
+          if (byte == 10) newlines++
+          else {
+            allowed = byte == 43 || byte == 45 || byte == 46 ||
+              (byte >= 48 && byte <= 57) ||
+              (byte >= 65 && byte <= 90) ||
+              (byte >= 97 && byte <= 122)
+            if (!allowed) invalid = 1
+          }
+        }
+      }
+      END { exit !(bytes > 2 && newlines == 1 && last == 10 && invalid != 1) }
+    ' \
+    && LC_ALL=C /usr/bin/grep -Eq '^v[0-9]+[0-9A-Za-z.+-]*$' "$tag_file"
+}
+
+extract_tag_file() {
+  tag_json=$1
+  tag_output=$2
+  tag_plist="$WORK_DIR/latest.plist"
+  json_to_plist "$tag_json" "$tag_plist" || return 1
+  /usr/libexec/PlistBuddy -c 'Print :tag_name' "$tag_plist" > "$tag_output" 2>/dev/null \
+    || return 1
+  file_is_valid_tag "$tag_output"
 }
 
 release_has_asset_pair() {
-  json=$1
+  json_file=$1
   dmg_name=$2
   checksum_name=$3
-  asset_count=$(printf '%s' "$json" \
-    | /usr/bin/plutil -extract assets raw -expect array -o - - 2>/dev/null) || return 2
-  case "$asset_count" in ''|*[!0-9]*) return 2 ;; esac
+  assets_plist="$WORK_DIR/release-assets.plist"
+  assets_dump="$WORK_DIR/assets.dump"
+  assets_head="$WORK_DIR/assets.head"
+  expected_array_head="$WORK_DIR/expected-array.head"
+  asset_name_file="$WORK_DIR/asset-name"
+  asset_state_file="$WORK_DIR/asset-state"
+  asset_url_file="$WORK_DIR/asset-url"
+  expected_dmg_name="$WORK_DIR/expected-dmg-name"
+  expected_checksum_name="$WORK_DIR/expected-checksum-name"
+  expected_uploaded="$WORK_DIR/expected-uploaded"
+  expected_dmg_url="$WORK_DIR/expected-dmg-url"
+  expected_checksum_url="$WORK_DIR/expected-checksum-url"
+
+  json_to_plist "$json_file" "$assets_plist" || return 2
+  /usr/libexec/PlistBuddy -c 'Print :assets' "$assets_plist" > "$assets_dump" 2>/dev/null \
+    || return 2
+  /usr/bin/head -n 1 "$assets_dump" > "$assets_head"
+  printf 'Array {\n' > "$expected_array_head"
+  /usr/bin/cmp -s "$assets_head" "$expected_array_head" || return 2
+
+  printf '%s\n' "$dmg_name" > "$expected_dmg_name"
+  printf '%s\n' "$checksum_name" > "$expected_checksum_name"
+  printf 'uploaded\n' > "$expected_uploaded"
+  printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$TAG" "$dmg_name" > "$expected_dmg_url"
+  printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$TAG" "$checksum_name" > "$expected_checksum_url"
 
   dmg_matches=0
   dmg_uploaded=0
   checksum_matches=0
   checksum_uploaded=0
   asset_index=0
-  while [ "$asset_index" -lt "$asset_count" ]; do
-    asset_name=$(printf '%s' "$json" \
-      | /usr/bin/plutil -extract "assets.$asset_index.name" raw -expect string -o - - 2>/dev/null) || return 2
-    asset_state=$(printf '%s' "$json" \
-      | /usr/bin/plutil -extract "assets.$asset_index.state" raw -expect string -o - - 2>/dev/null) || return 2
-    case "$asset_name" in
-      "$dmg_name")
-        dmg_matches=$((dmg_matches + 1))
-        [ "$asset_state" != uploaded ] || dmg_uploaded=$((dmg_uploaded + 1))
-        ;;
-      "$checksum_name")
-        checksum_matches=$((checksum_matches + 1))
-        [ "$asset_state" != uploaded ] || checksum_uploaded=$((checksum_uploaded + 1))
-        ;;
-    esac
+  while /usr/libexec/PlistBuddy -c "Print :assets:$asset_index" "$assets_plist" >/dev/null 2>&1; do
+    [ "$asset_index" -lt 1000 ] || return 2
+    /usr/libexec/PlistBuddy -c "Print :assets:$asset_index:name" "$assets_plist" > "$asset_name_file" 2>/dev/null \
+      || return 2
+    /usr/libexec/PlistBuddy -c "Print :assets:$asset_index:state" "$assets_plist" > "$asset_state_file" 2>/dev/null \
+      || return 2
+    /usr/libexec/PlistBuddy -c "Print :assets:$asset_index:browser_download_url" "$assets_plist" > "$asset_url_file" 2>/dev/null \
+      || return 2
+    file_is_single_line_text "$asset_url_file" || return 2
+
+    if /usr/bin/cmp -s "$asset_name_file" "$expected_dmg_name"; then
+      dmg_matches=$((dmg_matches + 1))
+      if /usr/bin/cmp -s "$asset_state_file" "$expected_uploaded" \
+        && /usr/bin/cmp -s "$asset_url_file" "$expected_dmg_url"; then
+        dmg_uploaded=$((dmg_uploaded + 1))
+      fi
+    elif /usr/bin/cmp -s "$asset_name_file" "$expected_checksum_name"; then
+      checksum_matches=$((checksum_matches + 1))
+      if /usr/bin/cmp -s "$asset_state_file" "$expected_uploaded" \
+        && /usr/bin/cmp -s "$asset_url_file" "$expected_checksum_url"; then
+        checksum_uploaded=$((checksum_uploaded + 1))
+      fi
+    fi
     asset_index=$((asset_index + 1))
   done
 
@@ -205,8 +270,11 @@ start_release_deadline() {
 # ---------- 1. 定位 DMG ----------
 if [ -z "$SRC" ]; then
   start_release_deadline
+  TAG_FILE="$WORK_DIR/release-tag"
   if [ -n "$RELEASE_TAG" ]; then
-    TAG=$RELEASE_TAG
+    printf '%s\n' "$RELEASE_TAG" > "$TAG_FILE"
+    file_is_valid_tag "$TAG_FILE" || die "指定 Release tag 无效，已停止安装。"
+    IFS= read -r TAG < "$TAG_FILE" || die "指定 Release tag 无效，已停止安装。"
     say "使用指定 Release $TAG…"
   else
     say "查询最新 Release…"
@@ -218,12 +286,11 @@ if [ -z "$SRC" ]; then
       124) die "查询 latest Release 已达到 ${RELEASE_TIMEOUT_SECONDS}s 安全时限；请稍后重跑安装命令。" ;;
       *) die "无法读取 GitHub latest Release；请检查网络后重跑安装命令。" ;;
     esac
-    LATEST=$(cat "$WORK_DIR/latest.json")
-    TAG=$(json_string_field tag_name "$LATEST") \
-      || die "latest Release 元数据无效，已停止安装。"
+    extract_tag_file "$WORK_DIR/latest.json" "$TAG_FILE" \
+      || die "latest Release 返回了无效 tag 或元数据，已停止安装。"
+    IFS= read -r TAG < "$TAG_FILE" \
+      || die "latest Release 返回了无效 tag 或元数据，已停止安装。"
   fi
-  printf '%s' "$TAG" | grep -Eq '^v[0-9]+[0-9A-Za-z.+-]*$' \
-    || die "latest Release 返回了无效 tag，已停止安装。"
 
   VERSION=${TAG#v}
   DMG_NAME="CodexSwitch-$VERSION-macos-arm64.dmg"
@@ -242,12 +309,11 @@ if [ -z "$SRC" ]; then
   fetch_json "$TAG_API" "$WORK_DIR/release.json" && metadata_status=0 || metadata_status=$?
   case "$metadata_status" in
     0)
-      META=$(cat "$WORK_DIR/release.json")
-      metadata_asset_pair_ready "$META" "$DMG_NAME" "$CHECKSUM_NAME" && ready=true || true
+      metadata_asset_pair_ready "$WORK_DIR/release.json" "$DMG_NAME" "$CHECKSUM_NAME" && ready=true || true
       ;;
     75) say "GitHub API 返回速率限制；将在安全时限内继续等待 ${TAG}…" ;;
     124) ;;
-    *) die "无法读取已锁定 Release: $RELEASE_URL" ;;
+    *) say "GitHub API 暂时不可用；将在安全时限内继续等待 ${TAG}…" ;;
   esac
 
   if [ "$ready" != true ]; then
@@ -262,15 +328,14 @@ if [ -z "$SRC" ]; then
       fetch_json "$TAG_API" "$WORK_DIR/release.json" && metadata_status=0 || metadata_status=$?
       case "$metadata_status" in
         0)
-          META=$(cat "$WORK_DIR/release.json")
-          if metadata_asset_pair_ready "$META" "$DMG_NAME" "$CHECKSUM_NAME"; then
+          if metadata_asset_pair_ready "$WORK_DIR/release.json" "$DMG_NAME" "$CHECKSUM_NAME"; then
             ready=true
             break
           fi
           ;;
         75) say "GitHub API 返回速率限制；将在安全时限内继续等待 ${TAG}…" ;;
         124) break ;;
-        *) die "轮询已锁定 Release 失败: $RELEASE_URL" ;;
+        *) say "GitHub API 暂时不可用；将在安全时限内继续等待 ${TAG}…" ;;
       esac
     done
   fi
