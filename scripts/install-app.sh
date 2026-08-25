@@ -146,6 +146,96 @@ extract_tag_file() {
   file_is_valid_tag "$tag_output"
 }
 
+json_has_one_top_level_tag_name() {
+  tag_json=$1
+  # plutil accepts duplicate JSON keys and keeps the last one. Count semantic
+  # top-level tag_name keys first (including JSON Unicode escapes), then let
+  # plutil validate and decode the complete document below.
+  LC_ALL=C /usr/bin/awk '
+    function expected_hex(character) {
+      if (character == "t") return "0074"
+      if (character == "a") return "0061"
+      if (character == "g") return "0067"
+      if (character == "_") return "005f"
+      if (character == "n") return "006e"
+      if (character == "m") return "006d"
+      if (character == "e") return "0065"
+      return ""
+    }
+    function is_tag_name(value,    wanted, position, wanted_index, character, escaped_hex) {
+      wanted = "tag_name"
+      position = 1
+      for (wanted_index = 1; wanted_index <= length(wanted); wanted_index++) {
+        character = substr(wanted, wanted_index, 1)
+        if (substr(value, position, 1) == character) {
+          position++
+        } else if (substr(value, position, 2) == "\\u") {
+          escaped_hex = tolower(substr(value, position + 2, 4))
+          if (escaped_hex != expected_hex(character)) return 0
+          position += 6
+        } else {
+          return 0
+        }
+      }
+      return position == length(value) + 1
+    }
+    {
+      line = $0
+      for (position = 1; position <= length(line); position++) {
+        character = substr(line, position, 1)
+        if (inside_string) {
+          if (escaped) {
+            string_value = string_value character
+            escaped = 0
+          } else if (character == "\\") {
+            string_value = string_value character
+            escaped = 1
+          } else if (character == "\"") {
+            inside_string = 0
+            if (depth == 1) pending_top_level_string = 1
+          } else {
+            string_value = string_value character
+          }
+          continue
+        }
+
+        if (pending_top_level_string) {
+          if (character == " " || character == "\t" || character == "\r") continue
+          if (character == ":" && is_tag_name(string_value)) tag_name_count++
+          pending_top_level_string = 0
+        }
+
+        if (character == "\"") {
+          inside_string = 1
+          escaped = 0
+          string_value = ""
+        } else if (character == "{" || character == "[") {
+          depth++
+        } else if (character == "}" || character == "]") {
+          depth--
+        }
+      }
+      if (inside_string) invalid = 1
+    }
+    END { exit !(invalid != 1 && inside_string != 1 && tag_name_count == 1) }
+  ' "$tag_json"
+}
+
+release_has_expected_tag() {
+  tag_json=$1
+  expected_tag=$2
+  tag_plist="$WORK_DIR/release-tag.plist"
+  actual_tag_file="$WORK_DIR/release-tag-name"
+  expected_tag_file="$WORK_DIR/expected-release-tag-name"
+
+  json_has_one_top_level_tag_name "$tag_json" || return 1
+  json_to_plist "$tag_json" "$tag_plist" || return 1
+  /usr/libexec/PlistBuddy -c 'Print :tag_name' "$tag_plist" > "$actual_tag_file" 2>/dev/null \
+    || return 1
+  printf '%s\n' "$expected_tag" > "$expected_tag_file"
+  /usr/bin/cmp -s "$actual_tag_file" "$expected_tag_file"
+}
+
 release_has_asset_pair() {
   json_file=$1
   dmg_name=$2
@@ -214,6 +304,8 @@ release_has_asset_pair() {
 }
 
 metadata_asset_pair_ready() {
+  release_has_expected_tag "$1" "$TAG" \
+    || die "Release tag_name 元数据无效，已停止安装: $RELEASE_URL"
   release_has_asset_pair "$1" "$2" "$3" && asset_status=0 || asset_status=$?
   case "$asset_status" in
     0) return 0 ;;

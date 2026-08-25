@@ -387,20 +387,25 @@ function readLog(filename) {
 
 async function startDeadlineHttpServer(t, root) {
   const serverFile = path.join(root, 'deadline-server.cjs');
-  const requestLog = path.join(root, 'http-requests.log');
+  const eventLog = path.join(root, 'http-events.log');
   fs.writeFileSync(serverFile, String.raw`const fs = require('node:fs');
 const http = require('node:http');
 
-const requestLog = process.argv[2];
+const eventLog = process.argv[2];
 let requests = 0;
 const server = http.createServer((_request, response) => {
   requests += 1;
-  fs.appendFileSync(requestLog, Date.now() + '\n');
+  fs.appendFileSync(eventLog, 'request-' + requests + '\n');
   if (requests === 1) {
+    fs.appendFileSync(eventLog, 'response-1-429\n');
     response.writeHead(429, { 'Content-Type': 'application/json', Connection: 'close' });
     response.end('{"message":"rate limited"}');
     return;
   }
+  fs.appendFileSync(eventLog, 'response-2-blocking-start\n');
+  response.once('close', () => {
+    fs.appendFileSync(eventLog, 'response-2-client-closed\n');
+  });
   response.writeHead(200, { 'Content-Type': 'application/json' });
   response.write('{"assets":[');
 });
@@ -410,7 +415,7 @@ server.listen(0, '127.0.0.1', () => {
 });
 `);
 
-  const child = spawn(process.execPath, [serverFile, requestLog], {
+  const child = spawn(process.execPath, [serverFile, eventLog], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   t.after(() => child.kill('SIGKILL'));
@@ -427,7 +432,7 @@ server.listen(0, '127.0.0.1', () => {
       const match = stdout.match(/READY ([0-9]+)/);
       if (!match) return;
       clearTimeout(timer);
-      resolve({ apiBase: `http://127.0.0.1:${match[1]}`, requestLog });
+      resolve({ apiBase: `http://127.0.0.1:${match[1]}`, eventLog });
     });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.once('exit', (code) => {
@@ -598,6 +603,53 @@ test('malformed release assets metadata fails closed with a clear error', (t) =>
   assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
 });
 
+test('exact-tag metadata tag_name must byte-match the frozen tag before assets are parsed', async (t) => {
+  const tag = 'v0.5.0';
+  const dmgName = 'CodexSwitch-0.5.0-macos-arm64.dmg';
+  const checksumName = `${dmgName}.sha256`;
+  const readyMetadata = JSON.parse(releaseJson(tag, [dmgName, checksumName]));
+  const missingTag = { ...readyMetadata };
+  delete missingTag.tag_name;
+  const wrongTagWithMalformedAssets = {
+    ...readyMetadata,
+    tag_name: 'v9.9.9',
+    assets: { name: 'not-an-array' },
+  };
+  const duplicateTag = releaseJson(tag, [dmgName, checksumName])
+    .replace(/^\{/, `{"tag_name":"${tag}",`);
+  const cases = [
+    ['another tag', JSON.stringify({ ...readyMetadata, tag_name: 'v9.9.9' })],
+    ['reviewer tag with trailing LF', JSON.stringify({ ...readyMetadata, tag_name: 'v9.9.9\n' })],
+    ['frozen tag with trailing LF', JSON.stringify({ ...readyMetadata, tag_name: `${tag}\n` })],
+    ['frozen tag with trailing CR', JSON.stringify({ ...readyMetadata, tag_name: `${tag}\r` })],
+    ['frozen tag with embedded NUL', JSON.stringify({ ...readyMetadata, tag_name: `${tag}\0` })],
+    ['missing tag_name', JSON.stringify(missingTag)],
+    ['duplicate tag_name', duplicateTag],
+    ['non-string tag_name', JSON.stringify({ ...readyMetadata, tag_name: 500 })],
+    ['wrong tag before malformed assets', JSON.stringify(wrongTagWithMalformedAssets)],
+  ];
+
+  for (const [label, response] of cases) {
+    await t.test(label, (subtest) => {
+      const fixture = createFixture(subtest, {
+        tag,
+        tagResponses: [response],
+        pollDelays: '0',
+      });
+
+      const result = runInstaller(fixture, ['--release-tag', tag]);
+
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /Release tag_name 元数据无效/);
+      assert.doesNotMatch(result.stderr, /\/usr\/bin\/awk:|syntax error|bailing out/);
+      assert.equal(readLog(fixture.logs.curl).filter((url) => url.includes('/releases/tags/')).length, 1);
+      assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
+      assert.equal(readLog(fixture.logs.hdiutil).length, 0);
+      assert.equal(readLog(fixture.logs.install).length, 0);
+    });
+  }
+});
+
 test('release asset fields are compared byte-for-byte without trimming control bytes', async (t) => {
   const tag = 'v0.5.0';
   const dmgName = 'CodexSwitch-0.5.0-macos-arm64.dmg';
@@ -754,11 +806,19 @@ test('real metadata curl retries outside curl and cannot exceed a two-second wal
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /等待 Release 资产超时/);
-  assert.ok(elapsedMs >= 1500, `curl did not exercise the blocking response: ${elapsedMs}ms`);
   assert.ok(elapsedMs < 3200, `two-second deadline overran: ${elapsedMs}ms`);
-  const requestTimes = readLog(server.requestLog).map(Number);
-  assert.equal(requestTimes.length, 2);
-  assert.ok(requestTimes[1] - requestTimes[0] < 900, `curl retried internally after ${requestTimes[1] - requestTimes[0]}ms`);
+  let events = readLog(server.eventLog);
+  for (let attempt = 0; attempt < 50 && !events.includes('response-2-client-closed'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    events = readLog(server.eventLog);
+  }
+  assert.deepEqual(events.filter((event) => event.startsWith('request-')), ['request-1', 'request-2']);
+  assert.equal(events.includes('response-1-429'), true);
+  assert.equal(events.includes('response-2-blocking-start'), true);
+  assert.equal(events.includes('response-2-client-closed'), true);
+  const metadataArgs = readLog(fixture.logs.curlArgs).filter((line) => line.includes('/releases/tags/'));
+  assert.equal(metadataArgs.length, 2);
+  assert.equal(metadataArgs.every((line) => !/--retry(?:[ -]|$)/.test(line)), true);
 });
 
 test('GitHub 429 and 403 rate limits retry only inside the frozen-tag deadline', (t) => {
