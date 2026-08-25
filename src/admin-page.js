@@ -150,6 +150,15 @@ export function isModelToggleAllowed(model, isSelected) {
   return Boolean(isSelected) || !model || (!model.referenceOnly && model.responses !== false);
 }
 
+export function buildProviderMutationRequest(provider, { editing = null, apiKey = '', deleteKey = false } = {}) {
+  const payload = { ...provider };
+  if (apiKey) payload.api_key = apiKey;
+  if (deleteKey) payload.delete_key = true;
+  return editing === null
+    ? { url: '/__admin/providers', body: payload }
+    : { url: '/__admin/providers/update', body: { origId: editing, provider: payload } };
+}
+
 export function renderAdminPage({ host, port, version }) {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -626,6 +635,7 @@ ${clearSensitiveModalFields.toString()}
 ${markDiscoveredModels.toString()}
 ${resolveDiscoveryModelSource.toString()}
 ${isModelToggleAllowed.toString()}
+${buildProviderMutationRequest.toString()}
 var CURRENT={providers:[],union:{providers:0,total:0,models:[]},envKeys:[],officialSync:{modelCount:0,sources:[]}};
 var EDITING=null;
 var PRESETS=[];
@@ -1504,45 +1514,28 @@ function saveProvider(){
   };
   if(SELECTED_PRESET.id==='custom')provider.provider_options.base_url=baseUrl;
   if(tokenEnv)provider.token_env=tokenEnv;
-  var url='/__admin/providers';
-  var body=provider;
-  if(EDITING!==null){url='/__admin/providers/update';body={origId:EDITING,provider:provider};}
-  var keyOperation=auth==='bearer'&&tokenEnv&&(enteredKey||deleteKey);
+  var request=buildProviderMutationRequest(provider,{
+    editing:EDITING,
+    apiKey:auth==='bearer'&&tokenEnv?enteredKey:'',
+    deleteKey:auth==='bearer'&&tokenEnv&&deleteKey
+  });
   var advisory=VALIDATION_STATUS!=='valid';
   $('saveBtn').disabled=true;
   $('saveBtn').setAttribute('aria-busy','true');
-  api(url,body).then(function(){
-    if(!keyOperation){
-      $('saveBtn').disabled=false;
-      $('saveBtn').setAttribute('aria-busy','false');
-      enteredKey='';
-      toast((EDITING!==null?'供应商已更新: ':'供应商已添加: ')+provider.id+(advisory?' · 连接未确认，首次调用为准':''));
-      closeModal();
-      loadProviders();
-      return;
-    }
-    var operation=deleteKey&&!enteredKey
-      ?api('/__admin/env-keys/delete',{name:tokenEnv})
-      :api('/__admin/env-keys/save',{name:tokenEnv,value:enteredKey});
-    operation.then(function(){
-      $('saveBtn').disabled=false;
-      $('saveBtn').setAttribute('aria-busy','false');
-      var what=deleteKey&&!enteredKey?'Key 已清除':'API Key 已保存，立即生效';
-      enteredKey='';
-      toast((EDITING!==null?'供应商已更新: ':'供应商已添加: ')+provider.id+' · '+what+(advisory?' · 连接未确认':''));
-      closeModal();
-      loadProviders();
-    },function(error){
-      $('saveBtn').disabled=false;
-      $('saveBtn').setAttribute('aria-busy','false');
-      enteredKey='';
-      setMsg('供应商已保存，但 API Key 操作失败: '+error.message,false);
-      loadProviders();
-    });
+  var pending=api(request.url,request.body);
+  if(request.body.provider)request.body.provider.api_key='';
+  else request.body.api_key='';
+  enteredKey='';
+  pending.then(function(){
+    $('saveBtn').disabled=false;
+    $('saveBtn').setAttribute('aria-busy','false');
+    var what=deleteKey?' · Key 已清除':($('f-apikey').value.trim()?' · API Key 已保存，能力已刷新':'');
+    toast((EDITING!==null?'供应商已更新: ':'供应商已添加: ')+provider.id+what+(advisory?' · 连接未确认，首次调用为准':''));
+    closeModal();
+    loadProviders();
   },function(error){
     $('saveBtn').disabled=false;
     $('saveBtn').setAttribute('aria-busy','false');
-    enteredKey='';
     setMsg(error.message,false);
   });
 }

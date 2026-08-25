@@ -18,7 +18,8 @@ import {
   buildCatalogEntry,
   cacheDiscoveredModels,
   capsCache,
-  CAPS_TTL_MS,
+  inspectDiscoveredCache,
+  invalidateDiscoveredModels,
   resolveCaps,
 } from './caps.js';
 import { officialCatalog } from './official.js';
@@ -26,6 +27,7 @@ import { discoverProvider } from './provider-discovery.js';
 import {
   buildProvidersRegion,
   normalizeProvider,
+  providerConnectionIdentity,
   replaceProvidersRegion,
 } from './provider-config.js';
 import {
@@ -232,23 +234,42 @@ function envKeyStatus() {
   }));
 }
 
-function resolveSavedProviderKey(providerId, requestedProviderType) {
-  if (typeof providerId !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(providerId)) return '';
-  const provider = (getConfig().providers || []).find((entry) => entry?.id === providerId);
-  const savedProviderType = String(provider?.provider_type || '').trim() || inferProviderType(provider?.base_url);
-  if (savedProviderType !== requestedProviderType) return '';
+function discoveryConnectionProvider(input) {
+  return normalizeProvider({
+    id: 'discovery-connection',
+    name: 'Discovery connection',
+    provider_type: input.providerType,
+    provider_options: input.providerOptions,
+    base_url: input.baseUrl,
+    auth: 'bearer',
+    token_env: 'DISCOVERY_CONNECTION_KEY',
+    models: [],
+  });
+}
+
+function providerMatchesDiscoveryConnection(provider, input) {
+  try {
+    return providerConnectionIdentity(provider) === providerConnectionIdentity(discoveryConnectionProvider(input));
+  } catch {
+    return false;
+  }
+}
+
+function resolveSavedProviderKey(input) {
+  if (typeof input.providerId !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(input.providerId)) return '';
+  const provider = (getConfig().providers || []).find((entry) => entry?.id === input.providerId);
+  if (!providerMatchesDiscoveryConnection(provider, input)) return '';
   const envName = typeof provider?.token_env === 'string' ? provider.token_env : '';
   if (!ENV_NAME_RE.test(envName)) return '';
   const value = process.env[envName];
   return typeof value === 'string' && value.length <= 4096 ? value.trim() : '';
 }
 
-function resolveDiscoveryCacheProvider(providerId, requestedProviderType) {
-  if (typeof providerId !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(providerId)) return null;
-  const provider = (getConfig().providers || []).find((entry) => entry?.id === providerId);
+function resolveDiscoveryCacheProvider(input) {
+  if (typeof input.providerId !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(input.providerId)) return null;
+  const provider = (getConfig().providers || []).find((entry) => entry?.id === input.providerId);
   if (!provider || provider.enabled === false) return null;
-  const savedProviderType = String(provider.provider_type || '').trim() || inferProviderType(provider.base_url);
-  return savedProviderType === requestedProviderType ? provider : null;
+  return providerMatchesDiscoveryConnection(provider, input) ? provider : null;
 }
 
 function saveEnvKey(name, value) {
@@ -782,23 +803,21 @@ function applyToCodex() {
 // ---------- capability refresh (provider discovery, cached 30 min) ----------
 // Discovery is advisory and only affects the generated catalog. A failed refresh
 // keeps any valid previous cache entry and never affects request forwarding.
-async function refreshAllCaps(force) {
-  const results = [];
-  for (const provider of getConfig().providers || []) {
-    if (provider.enabled === false) continue; // 停用的供应商不联网拉能力
-    if (!force) {
-      const cached = capsCache.get(provider.id);
-      if (cached && Date.now() - cached.at < CAPS_TTL_MS) {
-        results.push({ provider: provider.id, status: 'cached', models: cached.models.size });
-        continue;
-      }
+async function refreshProviderCaps(provider, force) {
+  if (!provider || provider.enabled === false) return { provider: provider?.id || '', status: 'skipped' };
+  let normalized;
+  try { normalized = normalizeProvider(provider); } catch {
+    invalidateDiscoveredModels(provider.id);
+    return { provider: provider.id, status: 'error' };
+  }
+  if (!force) {
+    const cacheState = inspectDiscoveredCache(normalized);
+    if (cacheState.status === 'fresh') {
+      return { provider: provider.id, status: 'cached', models: cacheState.cached.models.size };
     }
-    if (provider.auth !== 'bearer') {
-      results.push({ provider: provider.id, status: 'skipped' });
-      continue;
-    }
-    try {
-      const normalized = normalizeProvider(provider);
+  }
+  if (normalized.auth !== 'bearer') return { provider: provider.id, status: 'skipped' };
+  try {
       const apiKey = (provider.token_env && process.env[provider.token_env]) || provider.token || '';
       const discovered = await discoverProvider({
         providerType: normalized.provider_type,
@@ -808,19 +827,40 @@ async function refreshAllCaps(force) {
       });
       const discoveryStatus = discovered.validation.status;
       if (discovered.models.length || discoveryStatus === 'valid') {
-        cacheDiscoveredModels(provider.id, discovered.models);
-        results.push({
+        cacheDiscoveredModels(normalized, discovered.models);
+        return {
           provider: provider.id,
           status: discoveryStatus === 'valid' ? 'ok' : discoveryStatus,
           models: discovered.models.length,
-        });
-      } else {
-        results.push({ provider: provider.id, status: discoveryStatus });
+        };
       }
-    } catch (e) {
-      results.push({ provider: provider.id, status: 'error' });
-    }
+      return { provider: provider.id, status: discoveryStatus };
+  } catch {
+    return { provider: provider.id, status: 'error' };
   }
+}
+
+async function refreshAllCaps(force) {
+  const results = [];
+  for (const provider of getConfig().providers || []) {
+    if (provider.enabled === false) continue; // 停用的供应商不联网拉能力
+    results.push(await refreshProviderCaps(provider, force));
+  }
+  console.log(`[codex-switch] caps refresh: ${results.map((r) => `${r.provider}=${r.status}`).join(', ')}`);
+  return results;
+}
+
+async function refreshProviderCapsById(providerId, force = true) {
+  const provider = (getConfig().providers || []).find((entry) => entry?.id === providerId);
+  const result = await refreshProviderCaps(provider, force);
+  console.log(`[codex-switch] caps refresh: ${result.provider || providerId}=${result.status}`);
+  return result;
+}
+
+async function refreshCapsForTokenEnv(tokenEnv) {
+  const providers = (getConfig().providers || []).filter((provider) => provider?.token_env === tokenEnv);
+  const results = [];
+  for (const provider of providers) results.push(await refreshProviderCaps(provider, true));
   console.log(`[codex-switch] caps refresh: ${results.map((r) => `${r.provider}=${r.status}`).join(', ')}`);
   return results;
 }
@@ -971,6 +1011,7 @@ function restoreHistory(file) {
 // 所有 provider 变更的统一通道:解析 → 变更 → 重组 TOML → 校验 → 快照 → 写盘 → 热重载
 function mutateProviders(fn) {
   loadConfig();
+  const previousProviders = (cfg.providers || []).map((provider) => ({ ...provider }));
   const providers = (cfg.providers || []).map((p) => ({ ...p }));
   const result = fn(providers);
   const existing = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, 'utf8') : '';
@@ -981,7 +1022,16 @@ function mutateProviders(fn) {
   snapshotConfig();
   fs.writeFileSync(CONFIG_PATH, text);
   cfgMtime = 0; loadConfig();
-  refreshAllCaps(true).catch((e) => console.warn(`[codex-switch] caps refresh failed: ${e.message}`));
+  const nextProviders = new Map((cfg.providers || []).map((provider) => [provider.id, provider]));
+  for (const previous of previousProviders) {
+    const next = nextProviders.get(previous.id);
+    let sameConnection = false;
+    try {
+      sameConnection = Boolean(next)
+        && providerConnectionIdentity(previous) === providerConnectionIdentity(next);
+    } catch { /* Malformed or deleted providers invalidate cache fail closed. */ }
+    if (!sameConnection || next?.enabled === false) invalidateDiscoveredModels(previous.id);
+  }
   return result;
 }
 
@@ -991,32 +1041,95 @@ function requireBearerCred(np) {
   }
 }
 
-function addProvider(p) {
-  const np = normalizeProvider(p);
-  requireBearerCred(np);
-  return mutateProviders((providers) => {
-    if (providers.some((x) => x.id === np.id)) throw new Error(`provider '${np.id}' 已存在`);
-    providers.push(np);
-    return { ok: true, id: np.id };
-  });
+function submittedApiKey(input) {
+  if (input.api_key === undefined) return '';
+  if (typeof input.api_key !== 'string' || input.api_key.length > 4096) throw new Error('API Key 格式无效');
+  return input.api_key.trim();
 }
 
-function updateProvider(origId, p) {
+function captureProviderPersistenceState(tokenEnv) {
+  return {
+    config: fs.readFileSync(CONFIG_PATH, 'utf8'),
+    envExists: fs.existsSync(ENV_FILE),
+    envText: fs.existsSync(ENV_FILE) ? fs.readFileSync(ENV_FILE, 'utf8') : '',
+    processHadKey: Object.prototype.hasOwnProperty.call(process.env, tokenEnv),
+    processValue: process.env[tokenEnv],
+  };
+}
+
+function restoreProviderPersistenceState(state, tokenEnv) {
+  fs.writeFileSync(CONFIG_PATH, state.config);
+  cfgMtime = 0;
+  loadConfig();
+  if (state.envExists) {
+    fs.mkdirSync(path.dirname(ENV_FILE), { recursive: true });
+    fs.writeFileSync(ENV_FILE, state.envText, { mode: 0o600 });
+  } else {
+    try { fs.unlinkSync(ENV_FILE); } catch {}
+  }
+  if (state.processHadKey) process.env[tokenEnv] = state.processValue;
+  else delete process.env[tokenEnv];
+}
+
+async function addProvider(p) {
   const np = normalizeProvider(p);
-  return mutateProviders((providers) => {
-    const i = providers.findIndex((x) => x.id === origId);
-    if (i === -1) throw new Error(`未找到 provider '${origId}'`);
-    if (np.id !== origId && providers.some((x) => x.id === np.id)) throw new Error(`provider '${np.id}' 已存在`);
-    const orig = providers[i];
-    // 密钥绝不回传前端;编辑时若未重新提供凭证,沿用原有 token/token_env
-    if (!np.token && !np.token_env) {
-      if (orig.token) np.token = orig.token;
-      if (orig.token_env) np.token_env = orig.token_env;
-    }
-    requireBearerCred(np);
-    providers[i] = np;
-    return { ok: true, id: np.id };
-  });
+  requireBearerCred(np);
+  const apiKey = submittedApiKey(p);
+  if (apiKey && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
+  const state = captureProviderPersistenceState(np.token_env || '');
+  let result;
+  try {
+    result = mutateProviders((providers) => {
+      if (providers.some((x) => x.id === np.id)) throw new Error(`provider '${np.id}' 已存在`);
+      providers.push(np);
+      return { ok: true, id: np.id };
+    });
+    if (apiKey) saveEnvKey(np.token_env, apiKey);
+  } catch (error) {
+    if (result) restoreProviderPersistenceState(state, np.token_env || '');
+    throw error;
+  }
+  const capabilityRefresh = await refreshProviderCapsById(np.id, true);
+  return { ...result, capability_refresh: capabilityRefresh };
+}
+
+async function updateProvider(origId, p) {
+  const np = normalizeProvider(p);
+  const apiKey = submittedApiKey(p);
+  const original = (getConfig().providers || []).find((provider) => provider.id === origId);
+  if (!original) throw new Error(`未找到 provider '${origId}'`);
+  let connectionChanged = true;
+  try { connectionChanged = providerConnectionIdentity(original) !== providerConnectionIdentity(np); } catch {}
+  const hasNewInlineToken = Boolean(np.token && np.token !== original.token);
+  if (np.auth === 'bearer' && connectionChanged && !apiKey && !hasNewInlineToken) {
+    throw new Error('连接信息已变化，必须同时填写新的 API Key');
+  }
+  if (apiKey && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
+  const state = captureProviderPersistenceState(np.token_env || original.token_env || '');
+  let result;
+  try {
+    result = mutateProviders((providers) => {
+      const i = providers.findIndex((x) => x.id === origId);
+      if (i === -1) throw new Error(`未找到 provider '${origId}'`);
+      if (np.id !== origId && providers.some((x) => x.id === np.id)) throw new Error(`provider '${np.id}' 已存在`);
+      const orig = providers[i];
+      // 密钥绝不回传前端;编辑时若未重新提供凭证,沿用原有 token/token_env
+      if (!np.token && !np.token_env) {
+        if (orig.token) np.token = orig.token;
+        if (orig.token_env) np.token_env = orig.token_env;
+      }
+      requireBearerCred(np);
+      providers[i] = np;
+      return { ok: true, id: np.id };
+    });
+    if (apiKey) saveEnvKey(np.token_env, apiKey);
+    else if (p.delete_key === true && np.token_env) deleteEnvKey(np.token_env);
+  } catch (error) {
+    if (result) restoreProviderPersistenceState(state, np.token_env || original.token_env || '');
+    throw error;
+  }
+  const capabilityRefresh = await refreshProviderCapsById(np.id, true);
+  return { ...result, capability_refresh: capabilityRefresh };
 }
 
 function toggleProvider(id, enabled) {
@@ -1045,11 +1158,13 @@ function enabledUnion() {
   return { providers: enabled.length, total: (c.providers || []).length, models: sortSlugsForDisplay([...getRouteTable().keys()]) };
 }
 
-function capabilityCacheSummary(providerId) {
-  const cached = capsCache.get(providerId);
+function capabilityCacheSummary(provider) {
+  const cached = capsCache.get(provider.id);
   if (!cached) return { status: 'missing', model_count: 0, updated_at: null };
+  const inspected = inspectDiscoveredCache(provider);
+  if (inspected.status === 'identity_mismatch') return { status: 'missing', model_count: 0, updated_at: null };
   return {
-    status: Date.now() - cached.at < CAPS_TTL_MS ? 'fresh' : 'stale',
+    status: inspected.status,
     model_count: cached.models.size,
     updated_at: new Date(cached.at).toISOString(),
   };
@@ -1082,7 +1197,7 @@ function projectProviderForAdmin(provider) {
     auth: String(provider.auth || 'bearer'),
     models: Array.isArray(provider.models) ? provider.models.map(String) : [],
     enabled: provider.enabled !== false,
-    capability_cache: capabilityCacheSummary(provider.id),
+    capability_cache: capabilityCacheSummary(provider),
   };
   if (provider.token_env) output.token_env = String(provider.token_env);
   return output;
@@ -1124,7 +1239,7 @@ async function discoverProviderForAdmin(req, res, body) {
     return sendJson(res, 400, { error: 'invalid provider discovery request' });
   }
   const explicitKey = input.apiKey;
-  const apiKey = explicitKey || resolveSavedProviderKey(input.providerId, input.providerType);
+  const apiKey = explicitKey || resolveSavedProviderKey(input);
   const controller = new AbortController();
   const abort = () => controller.abort(new Error('admin discovery request closed'));
   const abortOnClose = () => { if (!res.writableEnded) abort(); };
@@ -1138,8 +1253,8 @@ async function discoverProviderForAdmin(req, res, body) {
       apiKey,
       signal: controller.signal,
     });
-    const cacheProvider = resolveDiscoveryCacheProvider(input.providerId, input.providerType);
-    if (cacheProvider && result.models.length) cacheDiscoveredModels(cacheProvider.id, result.models);
+    const cacheProvider = resolveDiscoveryCacheProvider(input);
+    if (cacheProvider && result.models.length) cacheDiscoveredModels(cacheProvider, result.models);
     return sendJson(res, 200, result);
   } catch {
     return sendJson(res, 500, { error: 'provider discovery failed' });
@@ -1443,13 +1558,20 @@ async function handleAdmin(req, bodyBuf, res) {
         return sendJson(res, 200, { ok: true, providers, union: enabledUnion(), officialSync, envKeys: envKeyStatus() });
       }
       if (req.method === 'POST' && p === '/__admin/providers') {
-        return sendJson(res, 200, addProvider(body));
+        return sendJson(res, 200, await addProvider(body));
       }
       if (req.method === 'POST' && p === '/__admin/providers/update') {
-        return sendJson(res, 200, updateProvider(String(body.origId || ''), body.provider || body));
+        const providerInput = body.provider || body;
+        if (body.api_key !== undefined && providerInput.api_key === undefined) providerInput.api_key = body.api_key;
+        if (body.delete_key === true) providerInput.delete_key = true;
+        return sendJson(res, 200, await updateProvider(String(body.origId || ''), providerInput));
       }
       if (req.method === 'POST' && p === '/__admin/providers/toggle') {
-        return sendJson(res, 200, toggleProvider(String(body.id || ''), body.enabled));
+        const toggled = toggleProvider(String(body.id || ''), body.enabled);
+        const capabilityRefresh = toggled.enabled
+          ? await refreshProviderCapsById(toggled.id, true)
+          : { provider: toggled.id, status: 'skipped' };
+        return sendJson(res, 200, { ...toggled, capability_refresh: capabilityRefresh });
       }
       if (req.method === 'POST' && p === '/__admin/providers/delete') {
         return sendJson(res, 200, deleteProvider(String(body.id || '')));
@@ -1467,7 +1589,9 @@ async function handleAdmin(req, bodyBuf, res) {
         return sendJson(res, 200, { ok: true, keys: envKeyStatus() }); // 只有 name+configured,绝不回传值
       }
       if (req.method === 'POST' && p === '/__admin/env-keys/save') {
-        return sendJson(res, 200, saveEnvKey(String(body.name || ''), body.value));
+        const saved = saveEnvKey(String(body.name || ''), body.value);
+        const capabilityRefresh = await refreshCapsForTokenEnv(saved.name);
+        return sendJson(res, 200, { ...saved, capability_refresh: capabilityRefresh });
       }
       if (req.method === 'POST' && p === '/__admin/env-keys/delete') {
         return sendJson(res, 200, deleteEnvKey(String(body.name || '')));

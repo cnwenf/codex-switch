@@ -4,6 +4,7 @@ import TOML from '@iarna/toml';
 import {
   buildProvidersRegion,
   normalizeProvider,
+  providerConnectionIdentity,
   replaceProvidersRegion,
 } from '../src/provider-config.js';
 import {
@@ -11,6 +12,18 @@ import {
   capsCache,
   resolveCaps,
 } from '../src/caps.js';
+
+function customProvider(id, baseUrl = `https://${id}.example/v1`) {
+  return normalizeProvider({
+    id,
+    provider_type: 'custom',
+    provider_options: { base_url: baseUrl },
+    base_url: baseUrl,
+    auth: 'bearer',
+    token_env: `${id.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()}_KEY`,
+    models: [],
+  });
+}
 
 test('provider type and options round-trip through TOML', () => {
   const provider = normalizeProvider({
@@ -27,6 +40,28 @@ test('provider type and options round-trip through TOML', () => {
   assert.equal(parsed.provider_type, 'aws-bedrock');
   assert.deepEqual(parsed.provider_options, { region: 'us-east-1' });
   assert.equal(parsed.base_url, 'https://bedrock-mantle.us-east-1.api.aws/v1');
+});
+
+test('connection identity covers authoritative options without credential material', () => {
+  const beijing = normalizeProvider({
+    id: 'bailian-a',
+    provider_type: 'bailian',
+    provider_options: { region: 'cn-beijing', workspace_id: '' },
+    auth: 'bearer',
+    token_env: 'SECRET_ENV_NAME',
+    token: 'fixture-inline-secret',
+    models: ['qwen-plus'],
+  });
+  const singapore = normalizeProvider({
+    ...beijing,
+    provider_options: { region: 'ap-southeast-1', workspace_id: '' },
+  });
+  const identity = providerConnectionIdentity(beijing);
+
+  assert.notEqual(identity, providerConnectionIdentity(singapore));
+  assert.equal(identity.includes('SECRET_ENV_NAME'), false);
+  assert.equal(identity.includes('fixture-inline-secret'), false);
+  assert.equal(identity.includes('qwen-plus'), false);
 });
 
 test('unsupported presets cannot be normalized into routes', () => {
@@ -165,7 +200,8 @@ test('provider region replacement preserves non-provider sections', () => {
 
 test('normalized discovery cache supplies capabilities below config overrides', (t) => {
   t.after(() => capsCache.clear());
-  cacheDiscoveredModels('provider-a', [{
+  const provider = customProvider('provider-a');
+  cacheDiscoveredModels(provider, [{
     id: 'discovered-model',
     contextWindow: 196000,
     input: { image: true },
@@ -173,7 +209,7 @@ test('normalized discovery cache supplies capabilities below config overrides', 
     source: 'api',
   }]);
 
-  assert.deepEqual(resolveCaps({}, { id: 'provider-a' }, 'discovered-model'), {
+  assert.deepEqual(resolveCaps({}, provider, 'discovered-model'), {
     contextWindow: 196000,
     vision: true,
     levels: [],
@@ -189,7 +225,7 @@ test('normalized discovery cache supplies capabilities below config overrides', 
         default_reasoning_effort: 'high',
       },
     },
-  }, { id: 'provider-a' }, 'discovered-model'), {
+  }, provider, 'discovered-model'), {
     contextWindow: 32000,
     vision: false,
     levels: ['high'],
@@ -200,8 +236,8 @@ test('normalized discovery cache supplies capabilities below config overrides', 
 
 test('unknown discovery vision falls back to static metadata while explicit false overrides it', (t) => {
   t.after(() => capsCache.clear());
-  const provider = { id: 'provider-vision' };
-  cacheDiscoveredModels(provider.id, [{
+  const provider = customProvider('provider-vision');
+  cacheDiscoveredModels(provider, [{
     id: 'qwen3.8-max',
     contextWindow: null,
     input: { image: 'unknown' },
@@ -218,7 +254,7 @@ test('unknown discovery vision falls back to static metadata while explicit fals
   assert.equal(resolveCaps({}, provider, 'qwen3.8-max').vision, true);
   assert.equal(resolveCaps({}, provider, 'unknown-static-model').vision, false);
 
-  cacheDiscoveredModels(provider.id, [{
+  cacheDiscoveredModels(provider, [{
     id: 'qwen3.8-max',
     contextWindow: null,
     input: { image: false },
@@ -226,4 +262,67 @@ test('unknown discovery vision falls back to static metadata while explicit fals
     source: 'api',
   }]);
   assert.equal(resolveCaps({}, provider, 'qwen3.8-max').vision, false);
+});
+
+test('discovery capabilities are bound to the complete normalized provider connection', (t) => {
+  t.after(() => capsCache.clear());
+  const providerA = normalizeProvider({
+    id: 'reused-provider',
+    provider_type: 'custom',
+    provider_options: { base_url: 'https://gateway-a.example/v1' },
+    base_url: 'https://gateway-a.example/v1',
+    auth: 'bearer',
+    token_env: 'REUSED_PROVIDER_KEY',
+    models: ['same-model'],
+  });
+  const providerB = normalizeProvider({
+    ...providerA,
+    provider_options: { base_url: 'https://gateway-b.example/v1' },
+    base_url: 'https://gateway-b.example/v1',
+  });
+  cacheDiscoveredModels(providerA, [{
+    id: 'same-model',
+    contextWindow: 424242,
+    input: { image: true },
+    reasoning: false,
+    source: 'api',
+  }]);
+
+  assert.equal(resolveCaps({}, providerA, 'same-model').contextWindow, 424242);
+  assert.deepEqual(resolveCaps({}, providerB, 'same-model'), {
+    contextWindow: 128000,
+    vision: false,
+    levels: [],
+    defaultLevel: null,
+    source: 'default (unknown model)',
+  });
+});
+
+test('expired discovery capabilities fail closed during catalog resolution', (t) => {
+  t.after(() => capsCache.clear());
+  const provider = normalizeProvider({
+    id: 'expired-provider',
+    provider_type: 'custom',
+    provider_options: { base_url: 'https://expired.example/v1' },
+    base_url: 'https://expired.example/v1',
+    auth: 'bearer',
+    token_env: 'EXPIRED_PROVIDER_KEY',
+    models: ['expired-model'],
+  });
+  cacheDiscoveredModels(provider, [{
+    id: 'expired-model',
+    contextWindow: 515151,
+    input: { image: true },
+    reasoning: false,
+    source: 'api',
+  }]);
+  capsCache.get(provider.id).at = Date.now() - 30 * 60 * 1000 - 1;
+
+  assert.deepEqual(resolveCaps({}, provider, 'expired-model'), {
+    contextWindow: 128000,
+    vision: false,
+    levels: [],
+    defaultLevel: null,
+    source: 'default (unknown model)',
+  });
 });

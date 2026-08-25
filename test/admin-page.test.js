@@ -336,8 +336,6 @@ test('renderer preserves provider CRUD, history, apply, restore, update, and lau
     '/__admin/providers/delete',
     '/__admin/provider-discover',
     '/__admin/providers/update',
-    '/__admin/env-keys/delete',
-    '/__admin/env-keys/save',
     '/__admin/fetch-capabilities',
     '/__admin/history',
     '/__admin/history/restore',
@@ -350,6 +348,7 @@ test('renderer preserves provider CRUD, history, apply, restore, update, and lau
   ]) {
     assert.ok(html.includes(endpoint), `missing preserved endpoint: ${endpoint}`);
   }
+  assert.doesNotMatch(html, /api\('\/__admin\/env-keys\/(?:save|delete)'/);
 
   const exports = await import('../src/admin-page.js');
   for (const helper of [
@@ -381,6 +380,33 @@ test('provider search matches Chinese and English while preserving Custom last w
   assert.deepEqual(filterOptions(providers, 'OPEN').map((item) => item.id), ['openai']);
   assert.equal(filterOptions(providers, '').at(-1).id, 'custom');
   assert.notEqual(filterOptions(providers, ''), providers);
+});
+
+test('provider save sends connection and new key in one atomic admin mutation', async () => {
+  const { buildProviderMutationRequest } = await import('../src/admin-page.js');
+  assert.equal(typeof buildProviderMutationRequest, 'function');
+  const provider = {
+    id: 'custom-a',
+    provider_type: 'custom',
+    base_url: 'https://a.example/v1',
+    token_env: 'CUSTOM_A_KEY',
+  };
+  assert.deepEqual(buildProviderMutationRequest(provider, {
+    editing: null,
+    apiKey: 'fixture-new-key',
+    deleteKey: false,
+  }), {
+    url: '/__admin/providers',
+    body: { ...provider, api_key: 'fixture-new-key' },
+  });
+  assert.deepEqual(buildProviderMutationRequest(provider, {
+    editing: 'custom-a',
+    apiKey: '',
+    deleteKey: true,
+  }), {
+    url: '/__admin/providers/update',
+    body: { origId: 'custom-a', provider: { ...provider, delete_key: true } },
+  });
 });
 
 test('model refresh deduplicates selections and preserves missing manual IDs', () => {

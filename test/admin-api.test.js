@@ -136,7 +136,7 @@ async function startCodexSwitchFixture(t, { providers = [], childEnv = {}, upstr
 
   const origin = `http://127.0.0.1:${port}`;
   await waitForHealth(origin, child);
-  return { origin, upstreamOrigin, upstreamRequests, output: () => output };
+  return { origin, upstreamOrigin, upstreamRequests, home, output: () => output };
 }
 
 async function postJson(origin, pathname, body) {
@@ -249,6 +249,258 @@ test('a saved key cannot be reused under a different provider type', async (t) =
   assert.equal(app.upstreamRequests.length, 0);
   assert.equal(JSON.stringify(result).includes(savedKey), false);
   assert.equal(app.output().includes(savedKey), false);
+});
+
+test('a saved key cannot be reused after a Custom connection URL changes', async (t) => {
+  const savedKey = 'fixture-cross-origin-secret';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'saved-custom',
+      providerType: 'custom',
+      providerOptions: { base_url: '' },
+      baseUrl: undefined,
+      tokenEnv: 'SAVED_CUSTOM_ORIGIN_KEY',
+      enabled: true,
+    }],
+    childEnv: { SAVED_CUSTOM_ORIGIN_KEY: savedKey },
+  });
+  const before = app.upstreamRequests.length;
+  const response = await postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'saved-custom',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/different-v1`,
+  });
+
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.validation.status, 'invalid');
+  assert.equal(app.upstreamRequests.length, before);
+  assert.equal(JSON.stringify(result).includes(savedKey), false);
+  assert.equal(app.output().includes(savedKey), false);
+});
+
+test('changing a Custom connection requires a new key and leaves the saved route unchanged on rejection', async (t) => {
+  const savedKey = 'fixture-update-origin-secret';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'saved-custom',
+      providerType: 'custom',
+      providerOptions: { base_url: '' },
+      tokenEnv: 'SAVED_CUSTOM_UPDATE_KEY',
+      enabled: true,
+      models: ['fixture-model'],
+    }],
+    childEnv: { SAVED_CUSTOM_UPDATE_KEY: savedKey },
+  });
+  const changedUrl = `${app.upstreamOrigin}/different-v1`;
+  const response = await postJson(app.origin, '/__admin/providers/update', {
+    origId: 'saved-custom',
+    provider: {
+      id: 'saved-custom',
+      name: 'Saved Custom',
+      provider_type: 'custom',
+      provider_options: { base_url: changedUrl },
+      base_url: changedUrl,
+      auth: 'bearer',
+      token_env: 'SAVED_CUSTOM_UPDATE_KEY',
+      models: ['fixture-model'],
+      enabled: true,
+    },
+  });
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /新.*API Key|API Key.*连接/);
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  assert.equal(providers.providers.find((provider) => provider.id === 'saved-custom').base_url, `${app.upstreamOrigin}/v1`);
+  assert.equal(app.upstreamRequests.some((request) => request.authorization === `Bearer ${savedKey}` && request.path.startsWith('/different-v1')), false);
+  assert.equal(app.output().includes(savedKey), false);
+});
+
+test('adding a validated provider with its key refreshes capabilities before the API returns', async (t) => {
+  const key = 'fixture-atomic-add-secret';
+  const app = await startCodexSwitchFixture(t, {
+    upstreamHandler(req, res) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{
+        id: 'fixture-model',
+        context_window: 424242,
+        input_modalities: ['text', 'image'],
+      }] }));
+    },
+  });
+  const response = await postJson(app.origin, '/__admin/providers', {
+    id: 'new-custom',
+    name: 'New Custom',
+    provider_type: 'custom',
+    provider_options: { base_url: `${app.upstreamOrigin}/v1` },
+    base_url: `${app.upstreamOrigin}/v1`,
+    auth: 'bearer',
+    token_env: 'NEW_CUSTOM_KEY',
+    api_key: key,
+    models: ['fixture-model'],
+    enabled: true,
+  });
+
+  assert.equal(response.status, 200);
+  const savedResult = await response.json();
+  assert.equal(savedResult.capability_refresh.status, 'ok');
+  assert.equal(JSON.stringify(savedResult).includes(key), false);
+  assert.equal(app.upstreamRequests.at(-1).authorization, `Bearer ${key}`);
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  assert.equal(providers.providers.find((provider) => provider.id === 'new-custom').capability_cache.status, 'fresh');
+  const generated = await fetch(`${app.origin}/__admin/codex-config`).then((res) => res.json());
+  const model = JSON.parse(generated.catalog_json).models.find((entry) => entry.slug === 'fixture-model');
+  assert.equal(model.context_window, 424242);
+  assert.deepEqual(model.input_modalities, ['text', 'image']);
+  assert.equal(app.output().includes(key), false);
+});
+
+test('an atomic provider and key save rolls config back when credential persistence fails', async (t) => {
+  const key = 'fixture-rollback-secret';
+  const app = await startCodexSwitchFixture(t);
+  const envDir = path.join(app.home, '.codex-switch');
+  fs.mkdirSync(path.join(envDir, 'env.tmp'), { recursive: true });
+
+  const response = await postJson(app.origin, '/__admin/providers', {
+    id: 'rollback-custom',
+    provider_type: 'custom',
+    provider_options: { base_url: `${app.upstreamOrigin}/v1` },
+    base_url: `${app.upstreamOrigin}/v1`,
+    auth: 'bearer',
+    token_env: 'ROLLBACK_CUSTOM_KEY',
+    api_key: key,
+    models: ['fixture-model'],
+    enabled: true,
+  });
+
+  assert.equal(response.status, 400);
+  const result = await response.json();
+  assert.equal(JSON.stringify(result).includes(key), false);
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  assert.equal(providers.providers.some((provider) => provider.id === 'rollback-custom'), false);
+  assert.equal(app.upstreamRequests.length, 0);
+  assert.equal(app.output().includes(key), false);
+});
+
+test('editing a provider invalidates old capabilities and refreshes only with the new connection key', async (t) => {
+  const oldKey = 'fixture-old-edit-secret';
+  const newKey = 'fixture-new-edit-secret';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'editable-custom',
+      providerType: 'custom',
+      providerOptions: { base_url: '' },
+      tokenEnv: 'EDITABLE_CUSTOM_KEY',
+      enabled: true,
+      models: ['fixture-model'],
+    }],
+    childEnv: { EDITABLE_CUSTOM_KEY: oldKey },
+    upstreamHandler(req, res) {
+      const contextWindow = req.url.startsWith('/new-v1') ? 222222 : 111111;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'fixture-model', context_window: contextWindow }] }));
+    },
+  });
+  const initial = await postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'editable-custom',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/v1`,
+  });
+  assert.equal((await initial.json()).validation.status, 'valid');
+
+  const updated = await postJson(app.origin, '/__admin/providers/update', {
+    origId: 'editable-custom',
+    provider: {
+      id: 'editable-custom',
+      provider_type: 'custom',
+      provider_options: { base_url: `${app.upstreamOrigin}/new-v1` },
+      base_url: `${app.upstreamOrigin}/new-v1`,
+      auth: 'bearer',
+      token_env: 'EDITABLE_CUSTOM_KEY',
+      api_key: newKey,
+      models: ['fixture-model'],
+      enabled: true,
+    },
+  });
+  assert.equal(updated.status, 200);
+  assert.equal((await updated.json()).capability_refresh.status, 'ok');
+  const generated = await fetch(`${app.origin}/__admin/codex-config`).then((res) => res.json());
+  assert.equal(JSON.parse(generated.catalog_json).models.find((model) => model.slug === 'fixture-model').context_window, 222222);
+  const newConnectionRequests = app.upstreamRequests.filter((request) => request.path.startsWith('/new-v1'));
+  assert.ok(newConnectionRequests.length > 0);
+  assert.equal(newConnectionRequests.every((request) => request.authorization === `Bearer ${newKey}`), true);
+  assert.equal(newConnectionRequests.some((request) => request.authorization === `Bearer ${oldKey}`), false);
+  assert.equal(app.output().includes(oldKey) || app.output().includes(newKey), false);
+});
+
+test('deleting and reusing a provider ID cannot resurrect capabilities from its old connection', async (t) => {
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'reused-custom',
+      providerType: 'custom',
+      providerOptions: { base_url: '' },
+      tokenEnv: 'OLD_REUSED_CUSTOM_KEY',
+      enabled: true,
+      models: ['fixture-model'],
+    }],
+    childEnv: { OLD_REUSED_CUSTOM_KEY: 'fixture-old-reused-secret' },
+    upstreamHandler(req, res) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'fixture-model', context_window: 333333 }] }));
+    },
+  });
+  const seeded = await postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'reused-custom',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/v1`,
+  });
+  assert.equal((await seeded.json()).validation.status, 'valid');
+  assert.equal((await postJson(app.origin, '/__admin/providers/delete', { id: 'reused-custom' })).status, 200);
+
+  const added = await postJson(app.origin, '/__admin/providers', {
+    id: 'reused-custom',
+    provider_type: 'custom',
+    provider_options: { base_url: 'https://new-unconfigured.example/v1' },
+    base_url: 'https://new-unconfigured.example/v1',
+    auth: 'bearer',
+    token_env: 'NEW_REUSED_CUSTOM_KEY',
+    models: ['fixture-model'],
+    enabled: true,
+  });
+  assert.equal(added.status, 200);
+  assert.equal((await added.json()).capability_refresh.status, 'invalid');
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  assert.deepEqual(providers.providers.find((provider) => provider.id === 'reused-custom').capability_cache, {
+    status: 'missing', model_count: 0, updated_at: null,
+  });
+  const generated = await fetch(`${app.origin}/__admin/codex-config`).then((res) => res.json());
+  assert.equal(JSON.parse(generated.catalog_json).models.find((model) => model.slug === 'fixture-model').context_window, 128000);
+});
+
+test('enabling a saved provider refreshes its capabilities before toggle returns', async (t) => {
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'disabled-custom',
+      providerType: 'custom',
+      providerOptions: { base_url: '' },
+      tokenEnv: 'DISABLED_REFRESH_KEY',
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+    childEnv: { DISABLED_REFRESH_KEY: 'fixture-disabled-refresh-secret' },
+    upstreamHandler(req, res) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'fixture-model', context_window: 616161 }] }));
+    },
+  });
+
+  const response = await postJson(app.origin, '/__admin/providers/toggle', {
+    id: 'disabled-custom', enabled: true,
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).capability_refresh.status, 'ok');
+  const generated = await fetch(`${app.origin}/__admin/codex-config`).then((res) => res.json());
+  assert.equal(JSON.parse(generated.catalog_json).models.find((model) => model.slug === 'fixture-model').context_window, 616161);
 });
 
 test('an explicit key cannot cache Custom discovery under a saved provider of another type', async (t) => {

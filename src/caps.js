@@ -7,6 +7,8 @@
 //
 // 对 codex 请求体零改写:本模块只影响 catalog 生成,不影响转发路径上的任何字节。
 
+import { providerConnectionIdentity } from './provider-config.js';
+
 // ---------- built-in static table ----------
 // 官方模型(gpt-5.6-*/gpt-5.5/gpt-5.4*/gpt-5.2/codex-auto-review):
 //   正常路径由 official.js 从 codex 二进制内嵌 catalog 逐字节镜像,这里的静态值
@@ -109,9 +111,11 @@ const EFFORT_DESCRIPTIONS = {
 const CAPS_TTL_MS = 30 * 60 * 1000;
 const capsCache = new Map();
 
-export function cacheDiscoveredModels(providerId, models) {
-  capsCache.set(providerId, {
+export function cacheDiscoveredModels(provider, models) {
+  const connectionIdentity = providerConnectionIdentity(provider);
+  capsCache.set(provider.id, {
     at: Date.now(),
+    connectionIdentity,
     models: new Map(models.map((model) => [model.id, {
       contextWindow: model.contextWindow,
       vision: model.input?.image,
@@ -123,11 +127,29 @@ export function cacheDiscoveredModels(providerId, models) {
 
 export { capsCache, CAPS_TTL_MS };
 
+export function inspectDiscoveredCache(provider, now = Date.now()) {
+  const cached = provider && capsCache.get(provider.id);
+  if (!cached) return { status: 'missing', cached: null };
+  let connectionIdentity;
+  try { connectionIdentity = providerConnectionIdentity(provider); } catch {
+    return { status: 'identity_mismatch', cached: null };
+  }
+  if (cached.connectionIdentity !== connectionIdentity) {
+    return { status: 'identity_mismatch', cached: null };
+  }
+  if (now - cached.at >= CAPS_TTL_MS) return { status: 'stale', cached: null };
+  return { status: 'fresh', cached };
+}
+
+export function invalidateDiscoveredModels(providerId) {
+  capsCache.delete(providerId);
+}
+
 // ---------- resolution ----------
 // Priority: config.toml [model_overrides] > provider discovery > static > default.
 export function resolveCaps(config, provider, modelId) {
   const over = config.model_overrides?.[modelId];
-  const cached = capsCache.get(provider.id);
+  const cached = inspectDiscoveredCache(provider).cached;
   const fetched = cached?.models?.get(modelId);
   const stat = STATIC_CAPS[modelId] || DEFAULT_CAPS;
   const discoveredVision = typeof fetched?.vision === 'boolean' ? fetched.vision : undefined;

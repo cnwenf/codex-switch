@@ -169,3 +169,18 @@ export function normalizeProvider(input) {
   normalized.enabled = !(provider.enabled === false || provider.enabled === 'false');
   return normalized;
 }
+
+// Stable, secret-free identity for the authoritative upstream connection.
+// IDs, display names, model lists and credential references are deliberately
+// excluded: they do not change where a bearer credential will be sent.
+export function providerConnectionIdentity(input) {
+  const provider = normalizeProvider(input);
+  const providerOptions = Object.fromEntries(
+    Object.entries(provider.provider_options || {}).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  return JSON.stringify({
+    provider_type: provider.provider_type,
+    provider_options: providerOptions,
+    base_url: provider.base_url,
+  });
+}
