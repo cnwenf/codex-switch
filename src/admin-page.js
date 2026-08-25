@@ -118,6 +118,16 @@ export function discoveryStatusCopy(status) {
   }[status] || { icon: '?', label: '未验证' };
 }
 
+export function providerCompatibilityCopy(compatibility) {
+  return {
+    supported: { icon: '✓', title: '支持 Responses 直连' },
+    beta: { icon: '△', title: 'Responses Beta' },
+    limited: { icon: '△', title: 'Responses 支持有限制' },
+    unverified: { icon: '?', title: '未验证 Responses 兼容性' },
+    unsupported: { icon: '✕', title: '暂不支持 Responses 直连' },
+  }[compatibility] || { icon: '?', title: '兼容性未知' };
+}
+
 export function shouldCloseModalOnEscape(state) {
   return state.key === 'Escape'
     && !state.defaultPrevented
@@ -157,6 +167,38 @@ export function buildProviderMutationRequest(provider, { editing = null, apiKey 
   return editing === null
     ? { url: '/__admin/providers', body: payload }
     : { url: '/__admin/providers/update', body: { origId: editing, provider: payload } };
+}
+
+export function sanitizeProviderOptions(value = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const output = {};
+  for (const [key, option] of Object.entries(value)) {
+    if (/token|secret|password|api[_-]?key|authorization|credential|oauth/i.test(key)) continue;
+    if (typeof option === 'string' || typeof option === 'boolean'
+      || (typeof option === 'number' && Number.isFinite(option))) output[key] = option;
+  }
+  return output;
+}
+
+export function buildProviderExportPayload(provider = {}) {
+  if (!provider || typeof provider !== 'object' || Array.isArray(provider)) return null;
+  const payload = {
+    id: provider.id,
+    name: provider.name,
+    provider_type: provider.provider_type,
+    provider_options: sanitizeProviderOptions(provider.provider_options),
+    auth: provider.auth,
+    base_url: provider.base_url,
+    models: Array.isArray(provider.models) ? provider.models : [],
+    enabled: provider.enabled !== false,
+  };
+  if (provider.token_env) payload.token_env = provider.token_env;
+  return payload;
+}
+
+export function sanitizeProviderImport(provider = {}) {
+  if (!provider || typeof provider !== 'object' || Array.isArray(provider)) return null;
+  return buildProviderExportPayload(provider);
 }
 
 export function renderAdminPage({ host, port, version }) {
@@ -540,8 +582,8 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
     <div class="modal-head"><b id="modalTitle">添加供应商</b><button class="xbtn" type="button" aria-label="关闭供应商设置" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
     <details class="advdet" id="importWrap"><summary>从 JSON 导入(粘贴其他机器「复制」得到的配置)</summary>
-      <div class="frow"><label for="f-import">配置 JSON</label><textarea id="f-import" rows="5" class="mono" placeholder="粘贴从其他机器「复制」得到的供应商 JSON(可含 api_key)" spellcheck="false"></textarea>
-      <div class="fhint">导入只是填充表单、不会直接落盘,仍需点「保存」。含 api_key 的 JSON 请妥善保管、勿外传。</div>
+      <div class="frow"><label for="f-import">配置 JSON</label><textarea id="f-import" rows="5" class="mono" placeholder="粘贴从其他机器「复制」得到的供应商元数据 JSON" spellcheck="false"></textarea>
+      <div class="fhint">导入只填充非敏感元数据；API Key 必须在本机重新输入后再保存。</div>
       <button class="btn small" type="button" onclick="importJson()">解析并填充表单</button></div>
     </details>
     <div class="form-grid">
@@ -629,6 +671,7 @@ ${nextOptionIndex.toString()}
 ${tabIndexForKey.toString()}
 ${combineCapability.toString()}
 ${discoveryStatusCopy.toString()}
+${providerCompatibilityCopy.toString()}
 ${shouldCloseModalOnEscape.toString()}
 ${shouldConsumeComboboxEscape.toString()}
 ${clearSensitiveModalFields.toString()}
@@ -636,6 +679,9 @@ ${markDiscoveredModels.toString()}
 ${resolveDiscoveryModelSource.toString()}
 ${isModelToggleAllowed.toString()}
 ${buildProviderMutationRequest.toString()}
+${sanitizeProviderOptions.toString()}
+${buildProviderExportPayload.toString()}
+${sanitizeProviderImport.toString()}
 var CURRENT={providers:[],union:{providers:0,total:0,models:[]},envKeys:[],officialSync:{modelCount:0,sources:[]}};
 var EDITING=null;
 var PRESETS=[];
@@ -656,7 +702,7 @@ var DISCOVERY_TIMER=null;
 var DISCOVERY_CONTROLLER=null;
 var DISCOVERY_SEQUENCE=0;
 var PREVIOUS_FOCUS=null;
-var STATIC_UNVERIFIED={'volcengine-ark':1,'azure-openai':1,'cloudflare-workers-ai':1};
+var STATIC_UNVERIFIED={'volcengine-ark':1,'azure-openai':1,'cloudflare-workers-ai':1,'nvidia-nim':1};
 function $(id){return document.getElementById(id);}
 var PRETTY_ACR={gpt:1,api:1,llm:1,url:1,ws:1};
 function prettyName(s){return String(s==null?'':s).split('-').map(function(w){if(!w)return w;if(PRETTY_ACR[w.toLowerCase()])return w.toUpperCase();return w.charAt(0).toUpperCase()+w.slice(1);}).join(' ');}
@@ -790,7 +836,7 @@ function providerCard(p){
   }
   card.appendChild(modelContainer);
   var actions=element('div','pcard-actions');
-  [['copy','复制','复制为 JSON（含 API Key，勿外传）'],['edit','编辑',''],['del','删除','']].forEach(function(entry){
+  [['copy','复制','复制非敏感元数据 JSON'],['edit','编辑',''],['del','删除','']].forEach(function(entry){
     var button=element('button','btn small'+(entry[0]==='del'?' danger':''),entry[1]);
     button.type='button';button.dataset.act=entry[0];button.dataset.id=p.id;if(entry[2])button.title=entry[2];actions.appendChild(button);
   });
@@ -805,13 +851,8 @@ function copyText(s,doneMsg){
 function copyProvider(id){
   api('/__admin/providers/export?id='+encodeURIComponent(id)).then(function(j){
     if(j.ok===false||!j.provider){toast('导出失败: '+(j.error||'unknown error'),false);return;}
-    var p=j.provider;
-    var o={id:p.id,name:p.name,provider_type:p.provider_type,provider_options:p.provider_options||{},auth:p.auth,base_url:p.base_url,token_env:p.token_env,models:p.models||[],enabled:p.enabled!==false};
-    if(p.api_key)o.api_key=p.api_key;
-    var includesKey=!!p.api_key;
-    var serialized=JSON.stringify(o,null,2);
-    o.api_key='';p.api_key='';
-    copyText(serialized,'已复制 '+id+' 配置 JSON'+(includesKey?'(含 API Key,勿外传)':''));
+    var serialized=JSON.stringify(buildProviderExportPayload(j.provider),null,2);
+    copyText(serialized,'已复制 '+id+' 非敏感配置 JSON');
   }).catch(function(e){toast('导出失败: '+e.message,false);});
 }
 function toggleP(id,on){
@@ -921,12 +962,7 @@ function moveProviderActive(delta){
   updateProviderActive();
 }
 function compatibilityCopy(preset){
-  return {
-    supported:{icon:'✓',title:'支持 Responses 直连'},
-    beta:{icon:'△',title:'Responses Beta'},
-    limited:{icon:'△',title:'Responses 支持有限制'},
-    unsupported:{icon:'✕',title:'暂不支持 Responses 直连'}
-  }[preset.compatibility]||{icon:'?',title:'兼容性未知'};
+  return providerCompatibilityCopy(preset.compatibility);
 }
 function renderCompatibility(preset){
   var box=$('providerCompatibility');
@@ -1445,7 +1481,7 @@ function importJson(){
   var raw=$('f-import').value.trim();
   if(!raw){setMsg('请先粘贴 JSON 内容',false);return;}
   var imported;
-  try{imported=JSON.parse(raw);}catch(error){setMsg('JSON 解析失败: '+error.message,false);return;}
+  try{imported=sanitizeProviderImport(JSON.parse(raw));}catch(error){setMsg('JSON 解析失败: '+error.message,false);return;}
   raw='';
   $('f-import').value='';
   if(!imported||typeof imported!=='object'||Array.isArray(imported)){setMsg('JSON 顶层必须是对象（供应商配置）。',false);return;}
@@ -1463,13 +1499,11 @@ function importJson(){
   if(typeof imported.enabled==='boolean')$('f-enabled').checked=imported.enabled;
   SELECTED_MODELS=mergeSelectedModels(Array.isArray(imported.models)?imported.models:String(imported.models||'').split(/[\\n,]+/).filter(Boolean),[]);
   MANUAL_MODEL_IDS=new Set(SELECTED_MODELS.map(function(model){return model.id;}));
-  if(imported.api_key||imported.token)$('f-apikey').value=String(imported.api_key||imported.token);
+  $('f-apikey').value='';
   renderSelectedModels();
   renderModelList();
   setMsg('已填充表单，请检查兼容性并完成检测。',true);
   scheduleDiscoveryIfReady();
-  imported.api_key='';
-  imported.token='';
 }
 function allowUnverifiedSave(){
   return EDITING!==null||!!(SELECTED_PRESET&&(SELECTED_PRESET.id==='custom'||STATIC_UNVERIFIED[SELECTED_PRESET.id]));
@@ -1756,7 +1790,7 @@ var UPD_POLL=null;
 function initUpdate(){
   api('/__admin/update/check').then(function(j){
     if(j.ok===false)return;
-    if(j.newer&&j.assetUrl){
+    if(j.newer){
       var a=$('updArea');
       if(a){
         clearNode(a);

@@ -1,6 +1,9 @@
 import {
+  CHATGPT_CODEX_BASE_URL,
   getProviderPreset,
+  inferProviderOptions,
   inferProviderType,
+  isTrustedLegacyPassthroughUrl,
   resolveProviderConnection,
 } from './provider-registry.js';
 
@@ -31,42 +34,6 @@ function tomlInlineTable(options) {
     .join(', ')} }`;
 }
 
-function inferProviderOptions(providerType, baseUrl) {
-  let url;
-  try {
-    url = new URL(String(baseUrl || ''));
-  } catch {
-    return {};
-  }
-  const hostname = url.hostname.toLowerCase();
-  if (providerType === 'aws-bedrock') {
-    const match = hostname.match(/^bedrock-mantle\.([a-z]{2}(?:-[a-z]+)+-\d+)\.api\.aws$/);
-    return match ? { region: match[1] } : {};
-  }
-  if (providerType === 'bailian') {
-    const workspace = hostname.match(/^([a-z0-9_-]+)\.(cn-beijing|ap-southeast-1|us-east-1)\.maas\.aliyuncs\.com$/i);
-    if (workspace) return { region: workspace[2], workspace_id: workspace[1] };
-    const region = {
-      'dashscope.aliyuncs.com': 'cn-beijing',
-      'dashscope-intl.aliyuncs.com': 'ap-southeast-1',
-      'dashscope-us.aliyuncs.com': 'us-east-1',
-    }[hostname];
-    return region ? { region, workspace_id: '' } : {};
-  }
-  if (providerType === 'tencent-tokenhub') {
-    return { site: hostname === 'tokenhub-intl.tencentcloudmaas.com' ? 'intl' : 'cn' };
-  }
-  if (providerType === 'cloudflare-workers-ai') {
-    const match = url.pathname.match(/^\/client\/v4\/accounts\/([A-Za-z0-9_-]+)\/ai\/v1\/?$/);
-    return match ? { account_id: match[1] } : {};
-  }
-  if (providerType === 'azure-openai') {
-    return { resource_endpoint: `${url.protocol}//${url.host}` };
-  }
-  if (providerType === 'nvidia-nim') return { base_url: String(baseUrl) };
-  return {};
-}
-
 // 把 providers 数组序列化为 [[providers]] 区块文本(每块带一行可读注释)
 export function buildProvidersRegion(providers) {
   const blocks = providers.map((provider) => {
@@ -82,7 +49,6 @@ export function buildProvidersRegion(providers) {
     lines.push(`base_url = ${tomlStr(provider.base_url || '')}`);
     lines.push(`auth = ${tomlStr(provider.auth || 'bearer')}`);
     if (provider.token_env) lines.push(`token_env = ${tomlStr(provider.token_env)}`);
-    if (provider.token) lines.push(`token = ${tomlStr(provider.token)}`);
     lines.push(`models = [${(provider.models || []).map(tomlStr).join(', ')}]`);
     lines.push(`enabled = ${provider.enabled === false ? 'false' : 'true'}`);
     return lines.join('\n');
@@ -121,18 +87,11 @@ export function replaceProvidersRegion(text, providers) {
   return parts.join('\n');
 }
 
-// 规范化前端提交的 provider 对象(models 支持数组或逗号/换行分隔字符串)
-export function normalizeProvider(input) {
-  const provider = input || {};
+function normalizeCommonProviderFields(provider) {
   const id = String(provider.id || '').trim();
   if (!id) throw new Error('provider id 不能为空');
   if (!/^[A-Za-z0-9_.-]+$/.test(id)) {
     throw new Error(`provider id 只能含字母/数字/_/-/.(收到 '${id}')`);
-  }
-
-  const auth = String(provider.auth || 'bearer').trim();
-  if (!['bearer', 'chatgpt_subscription', 'chatgpt_oauth', 'passthrough'].includes(auth)) {
-    throw new Error(`未知 auth 类型 '${auth}'`);
   }
 
   let tokenEnv = '';
@@ -145,11 +104,36 @@ export function normalizeProvider(input) {
     tokenEnv = provider.token_env;
   }
 
+  if (provider.models !== undefined && !Array.isArray(provider.models) && typeof provider.models !== 'string') {
+    throw new Error('models 必须是数组或分隔字符串');
+  }
+  const rawModels = Array.isArray(provider.models)
+    ? provider.models
+    : String(provider.models || '').split(/[\n,，;]+/);
+  return {
+    id,
+    name: String(provider.name || id).trim(),
+    tokenEnv,
+    models: [...new Set(rawModels.map((model) => String(model).trim()).filter(Boolean))],
+    enabled: !(provider.enabled === false || provider.enabled === 'false'),
+  };
+}
+
+// 规范化前端提交的 provider 对象(models 支持数组或逗号/换行分隔字符串)
+export function normalizeProvider(input) {
+  const provider = input || {};
+  if (Object.hasOwn(provider, 'token')) throw new Error('新供应商配置禁止 inline token；请通过 API Key 字段保存到 env');
+  const common = normalizeCommonProviderFields(provider);
+
   const explicitType = String(provider.provider_type || '').trim();
   const providerType = explicitType || inferProviderType(provider.base_url);
   const preset = getProviderPreset(providerType);
   if (!preset) throw new Error(`未知 provider_type '${providerType}'`);
   if (!preset.routable) throw new Error(`provider '${providerType}' 不支持 Responses 直连`);
+  const auth = String(provider.auth || preset.auth).trim();
+  if (auth !== preset.auth) {
+    throw new Error(`provider '${providerType}' 的 auth 必须由服务端固定为 '${preset.auth}'`);
+  }
   const submittedOptions = provider.provider_options && Object.keys(provider.provider_options).length
     ? provider.provider_options
     : inferProviderOptions(providerType, provider.base_url);
@@ -158,25 +142,103 @@ export function normalizeProvider(input) {
     submittedOptions,
     provider.base_url || '',
   );
-
-  const rawModels = Array.isArray(provider.models)
-    ? provider.models
-    : String(provider.models || '').split(/[\n,，;]+/);
-  const models = [...new Set(rawModels.map((model) => String(model).trim()).filter(Boolean))];
+  if (providerType === 'custom') {
+    const disguisedType = inferProviderType(connection.baseUrl);
+    const disguisedPreset = getProviderPreset(disguisedType);
+    if (disguisedType !== 'custom' && disguisedPreset && !disguisedPreset.routable) {
+      throw new Error(`unsupported official endpoint '${disguisedType}' 不能保存为 Custom`);
+    }
+  }
   const normalized = {
-    id,
-    name: String(provider.name || id).trim(),
+    id: common.id,
+    name: common.name,
     provider_type: connection.providerType,
     provider_options: { ...connection.providerOptions },
     base_url: connection.baseUrl,
     auth,
   };
-  if (auth === 'bearer' || auth === 'chatgpt_oauth') {
-    if (tokenEnv) normalized.token_env = tokenEnv;
-    if (provider.token && String(provider.token).trim()) normalized.token = String(provider.token).trim();
+  if (auth === 'bearer' && common.tokenEnv) normalized.token_env = common.tokenEnv;
+  normalized.models = common.models;
+  normalized.enabled = common.enabled;
+  return normalized;
+}
+
+// Existing config is a compatibility input, not a mutation contract. Providers
+// without provider_type keep their safe URL/auth, while explicit modern entries
+// still obey the registry's authoritative connection and auth policy.
+export function normalizeProviderForLoad(input) {
+  const provider = input || {};
+  const common = normalizeCommonProviderFields(provider);
+  const explicitType = String(provider.provider_type || '').trim();
+  const inlineToken = typeof provider.token === 'string' && provider.token.length ? provider.token : '';
+
+  if (explicitType) {
+    const candidate = { ...provider };
+    delete candidate.token;
+    const requestedAuth = String(provider.auth || '').trim();
+    if (explicitType === 'chatgpt-sub' && requestedAuth === 'chatgpt_oauth') {
+      candidate.auth = 'chatgpt_subscription';
+      const normalized = normalizeProvider(candidate);
+      normalized.auth = 'chatgpt_oauth';
+      return normalized;
+    }
+    const normalized = normalizeProvider(candidate);
+    if (inlineToken && normalized.auth === 'bearer') normalized.token = inlineToken;
+    return normalized;
   }
-  normalized.models = models;
-  normalized.enabled = !(provider.enabled === false || provider.enabled === 'false');
+
+  const auth = String(provider.auth || 'bearer').trim();
+  if (!['bearer', 'chatgpt_subscription', 'chatgpt_oauth', 'passthrough'].includes(auth)) {
+    throw new Error(`未知 auth 类型 '${auth}'`);
+  }
+  const legacyConnection = resolveProviderConnection('custom', {}, provider.base_url || '');
+  let providerType = 'custom';
+  let providerOptions = { ...legacyConnection.providerOptions };
+  let baseUrl = legacyConnection.baseUrl;
+
+  if (auth === 'chatgpt_subscription' || auth === 'chatgpt_oauth') {
+    if (baseUrl !== CHATGPT_CODEX_BASE_URL) {
+      throw new Error('legacy ChatGPT auth 只允许精确的 ChatGPT Codex origin/base path');
+    }
+    providerType = 'chatgpt-sub';
+    providerOptions = {};
+    baseUrl = CHATGPT_CODEX_BASE_URL;
+  } else if (auth === 'passthrough') {
+    if (!isTrustedLegacyPassthroughUrl(baseUrl)) {
+      throw new Error('legacy passthrough 只允许 loopback 或 registry 精确可信 origin');
+    }
+    const inferredType = inferProviderType(baseUrl);
+    const inferredPreset = getProviderPreset(inferredType);
+    if (inferredPreset?.routable && inferredType !== 'custom') {
+      providerType = inferredType;
+      providerOptions = { ...inferProviderOptions(inferredType, baseUrl) };
+    }
+  } else {
+    const inferredType = inferProviderType(baseUrl);
+    const inferredPreset = getProviderPreset(inferredType);
+    if (inferredPreset?.routable && inferredPreset.auth === 'bearer' && inferredType !== 'custom') {
+      try {
+        const inferred = resolveProviderConnection(inferredType, inferProviderOptions(inferredType, baseUrl), baseUrl);
+        if (inferred.baseUrl === baseUrl) {
+          providerType = inferred.providerType;
+          providerOptions = { ...inferred.providerOptions };
+        }
+      } catch { /* Safe legacy bearer stays Custom with its original URL. */ }
+    }
+  }
+
+  const normalized = {
+    id: common.id,
+    name: common.name,
+    provider_type: providerType,
+    provider_options: providerOptions,
+    base_url: baseUrl,
+    auth,
+    models: common.models,
+    enabled: common.enabled,
+  };
+  if ((auth === 'bearer' || auth === 'chatgpt_oauth') && common.tokenEnv) normalized.token_env = common.tokenEnv;
+  if (auth === 'bearer' && inlineToken) normalized.token = inlineToken;
   return normalized;
 }
 
@@ -184,7 +246,7 @@ export function normalizeProvider(input) {
 // IDs, display names, model lists and credential references are deliberately
 // excluded: they do not change where a bearer credential will be sent.
 export function providerConnectionIdentity(input) {
-  const provider = normalizeProvider(input);
+  const provider = normalizeProviderForLoad(input);
   const providerOptions = Object.fromEntries(
     Object.entries(provider.provider_options || {}).sort(([left], [right]) => left.localeCompare(right)),
   );

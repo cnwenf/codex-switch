@@ -409,6 +409,35 @@ test('provider save sends connection and new key in one atomic admin mutation', 
   });
 });
 
+test('clipboard export contains metadata only and JSON import always clears credential fields', async () => {
+  const page = await import('../src/admin-page.js');
+  assert.equal(typeof page.buildProviderExportPayload, 'function');
+  assert.equal(typeof page.sanitizeProviderImport, 'function');
+  const secret = 'fixture-clipboard-import-key';
+  const exported = page.buildProviderExportPayload({
+    id: 'custom-a',
+    name: 'Custom A',
+    provider_type: 'custom',
+    provider_options: { base_url: 'https://a.example/v1', api_key: secret, nested: { token: secret } },
+    auth: 'bearer',
+    base_url: 'https://a.example/v1',
+    token_env: 'CUSTOM_A_KEY',
+    api_key: secret,
+    token: secret,
+    models: ['fixture-model'],
+    enabled: true,
+  });
+  assert.equal(JSON.stringify(exported).includes(secret), false);
+  assert.equal(Object.hasOwn(exported, 'api_key'), false);
+  assert.equal(Object.hasOwn(exported, 'token'), false);
+
+  const imported = page.sanitizeProviderImport({ ...exported, api_key: secret, token: secret });
+  assert.equal(JSON.stringify(imported).includes(secret), false);
+  assert.equal(Object.hasOwn(imported, 'api_key'), false);
+  assert.equal(Object.hasOwn(imported, 'token'), false);
+  assert.equal(page.sanitizeProviderImport([]), null);
+});
+
 test('model refresh deduplicates selections and preserves missing manual IDs', () => {
   const merged = mergeSelectedModels(
     ['manual-model', 'found-model', 'manual-model'],
@@ -560,6 +589,15 @@ test('all validation states have visible icon and text labels', () => {
     assert.ok(copy.icon, status);
     assert.ok(copy.label, status);
   }
+});
+
+test('Custom and NIM render an explicit unverified Responses warning', async () => {
+  const page = await import('../src/admin-page.js');
+  assert.equal(typeof page.providerCompatibilityCopy, 'function');
+  const warning = page.providerCompatibilityCopy('unverified');
+  assert.match(warning.title, /未验证.*Responses|Responses.*未验证/);
+  assert.notEqual(warning.title, page.providerCompatibilityCopy('limited').title);
+  assert.match(render(), /providerCompatibilityCopy/);
 });
 
 test('rendered browser script parses as JavaScript', () => {

@@ -68,10 +68,10 @@ async function startProxyFixture(t, upstreamHandler, { baseUrl } = {}) {
     `auth_json_path = ${JSON.stringify(path.join(home, '.codex', 'auth.json'))}`,
     '',
     '[[providers]]',
-    'id = "subscription"',
-    'name = "ChatGPT Subscription"',
+    'id = "loopback-passthrough"',
+    'name = "Loopback Passthrough"',
     `base_url = ${JSON.stringify(baseUrl || upstreamOrigin + '/backend-api/codex')}`,
-    'auth = "chatgpt_subscription"',
+    'auth = "passthrough"',
     'models = ["fixture-subscription-model"]',
     'enabled = true',
     '',
@@ -91,6 +91,13 @@ async function startProxyFixture(t, upstreamHandler, { baseUrl } = {}) {
   child.stdout.on('data', (chunk) => { output += chunk; });
   child.stderr.on('data', (chunk) => { output += chunk; });
 
+  t.after(async () => {
+    await stopChild(child);
+    upstream.closeAllConnections?.();
+    await new Promise((resolve) => upstream.close(resolve));
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
   const origin = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + 5_000;
   let healthy = false;
@@ -107,12 +114,6 @@ async function startProxyFixture(t, upstreamHandler, { baseUrl } = {}) {
   }
   if (!healthy) throw new Error(`codex-switch fixture did not become healthy: ${output}`);
 
-  t.after(async () => {
-    await stopChild(child);
-    upstream.closeAllConnections?.();
-    await new Promise((resolve) => upstream.close(resolve));
-    fs.rmSync(home, { recursive: true, force: true });
-  });
   return { child, origin, home, configPath, output: () => output };
 }
 

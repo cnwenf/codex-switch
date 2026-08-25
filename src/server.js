@@ -16,6 +16,11 @@ import { fileURLToPath } from 'node:url';
 import TOML from '@iarna/toml';
 import { renderAdminPage } from './admin-page.js';
 import {
+  buildInstallerCommand,
+  buildInstallerEnvironment,
+  summarizeReleaseUpdate,
+} from './app-update.js';
+import {
   buildCatalogEntry,
   cacheDiscoveredModels,
   capsCache,
@@ -30,6 +35,7 @@ import {
   buildProvidersRegion,
   ENV_NAME_RE,
   normalizeProvider,
+  normalizeProviderForLoad,
   providerConnectionIdentity,
   replaceProvidersRegion,
 } from './provider-config.js';
@@ -64,7 +70,8 @@ function expandHome(p) {
 
 function buildRouteTable(c) {
   const m = new Map();
-  for (const p of c.providers || []) {
+  const providers = (c.providers || []).map((provider) => normalizeProviderForLoad(provider));
+  for (const p of providers) {
     if (p.enabled === false) continue; // 停用的供应商不进路由表(管理页可重新启用)
     for (const model of p.models || []) {
       if (m.has(model)) {
@@ -76,7 +83,7 @@ function buildRouteTable(c) {
   // 官方目录自动同步:chatgpt_subscription 供应商自动承接 codex 二进制内嵌官方
   // catalog 里的全部模型(OpenAI 新增模型随 codex 升级自动发现,无需手工维护)。
   // 提取失败时静默跳过,配置里手写的 models 列表仍然生效(回退)。
-  const sub = (c.providers || []).find((p) => p.enabled !== false && p.auth === 'chatgpt_subscription');
+  const sub = providers.find((p) => p.enabled !== false && p.auth === 'chatgpt_subscription');
   if (sub) {
     try {
       const oc = officialCatalog();
@@ -229,7 +236,11 @@ function parseEnvFile(text) {
     if (eq <= 0) continue;
     const k = t.slice(0, eq).trim();
     let v = t.slice(eq + 1).trim();
-    if (v.length >= 2 && ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"')))) {
+    if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) {
+      const decoded = v.slice(1, -1).replace(/'\\''/g, "'");
+      if (shellQuote(decoded) !== v) continue;
+      v = decoded;
+    } else if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
       v = v.slice(1, -1);
     }
     if (ENV_NAME_RE.test(k)) out.set(k, v);
@@ -264,6 +275,13 @@ function envKeyStatus() {
     name,
     configured: Boolean(process.env[name]) || Boolean(fileKeys.get(name)),
   }));
+}
+
+function validateEnvKeyValue(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error('Key 值不能为空(要移除请用「清除」)');
+  if (value.length > 4096) throw new Error('Key 值过长');
+  if (/[\r\n\0]/.test(value)) throw new Error('Key 值不能包含 CR、LF 或 NUL');
+  return value;
 }
 
 function discoveryConnectionProvider(input) {
@@ -307,8 +325,7 @@ function resolveDiscoveryCacheProvider(input) {
 function saveEnvKey(name, value) {
   if (!ENV_NAME_RE.test(name)) throw new Error('非法的环境变量名');
   if (!allowedEnvNames().has(name)) throw new Error(`环境变量 '${name}' 未被任何供应商的 token_env 引用,拒绝写入`);
-  if (typeof value !== 'string' || !value.trim()) throw new Error('Key 值不能为空(要移除请用「清除」)');
-  if (value.length > 4096) throw new Error('Key 值过长');
+  validateEnvKeyValue(value);
   const entries = readEnvFileEntries();
   // Revoke stale discovery before the new credential can become visible.
   invalidateProvidersForCredentialMutation(name);
@@ -840,7 +857,7 @@ function applyToCodex() {
 // Discovery is advisory and only affects the generated catalog. A failed refresh
 // keeps any valid previous cache entry and never affects request forwarding.
 function beginProviderRefreshLease(provider) {
-  const normalized = normalizeProvider(provider);
+  const normalized = normalizeProviderForLoad(provider);
   const lease = {
     providerId: normalized.id,
     refreshIdentity: providerRefreshIdentity(normalized),
@@ -864,7 +881,7 @@ function providerRefreshLeaseIsCurrent(lease) {
 }
 
 function providerRefreshIdentity(provider) {
-  const normalized = normalizeProvider(provider);
+  const normalized = normalizeProviderForLoad(provider);
   return JSON.stringify({
     auth: normalized.auth,
     connection: runtimeProviderConnectionIdentity(provider),
@@ -905,7 +922,7 @@ async function refreshProviderCaps(provider, force, isCurrent = () => true) {
   if (!provider || provider.enabled === false) return { provider: provider?.id || '', status: 'skipped' };
   if (!isCurrent()) return { provider: provider.id, status: 'superseded' };
   let normalized;
-  try { normalized = normalizeProvider(provider); } catch {
+  try { normalized = normalizeProviderForLoad(provider); } catch {
     invalidateDiscoveredModels(provider.id);
     return { provider: provider.id, status: 'error' };
   }
@@ -1171,13 +1188,16 @@ function stableConfigValue(value) {
   return value;
 }
 
-function providerMapForMutation(config, source) {
+function providerMapForMutation(config, source, { rejectInlineTokens = false } = {}) {
   const providers = config?.providers === undefined ? [] : config.providers;
   if (!Array.isArray(providers)) throw new Error(`${source}: providers 必须是数组`);
   const byId = new Map();
   const order = [];
   for (const provider of providers) {
-    try { normalizeProvider(provider); } catch (error) {
+    if (rejectInlineTokens && Object.hasOwn(provider || {}, 'token')) {
+      throw new Error(`${source}: inline token 只能作为旧配置的服务端读取输入`);
+    }
+    try { normalizeProviderForLoad(provider); } catch (error) {
       throw new Error(`${source}: provider 配置无效: ${error.message}`);
     }
     const providerId = typeof provider?.id === 'string' ? provider.id.trim() : '';
@@ -1193,7 +1213,7 @@ function providerMapForMutation(config, source) {
 
 function providerMutationPlan(previousConfig, nextConfig, source) {
   const previous = providerMapForMutation(previousConfig, source);
-  const next = providerMapForMutation(nextConfig, source);
+  const next = providerMapForMutation(nextConfig, source, { rejectInlineTokens: true });
   const changedProviderIds = new Set([...previous.byId.keys(), ...next.byId.keys()]);
   for (const providerId of [...changedProviderIds]) {
     const before = previous.byId.get(providerId);
@@ -1218,7 +1238,7 @@ function runtimeProviderConnectionIdentity(provider) {
 }
 
 function bearerCredentialReference(provider) {
-  const normalized = normalizeProvider(provider);
+  const normalized = normalizeProviderForLoad(provider);
   return JSON.stringify({
     tokenEnv: normalized.token_env || '',
     legacyInlineTokenPresent: Boolean(normalized.token),
@@ -1233,7 +1253,7 @@ function validateBearerMutation(plan, authorizedBearerProviderIds, source) {
     if (!after || String(after.auth || 'bearer').trim() !== 'bearer') continue;
 
     let normalizedAfter;
-    try { normalizedAfter = normalizeProvider(after); } catch (error) {
+    try { normalizedAfter = normalizeProviderForLoad(after); } catch (error) {
       throw new Error(`${source}: provider '${providerId}' 无效: ${error.message}`);
     }
     requireBearerCred(normalizedAfter);
@@ -1296,7 +1316,22 @@ function restoreHistory(file) {
   const src = path.join(HISTORY_DIR, safe);
   if (!fs.existsSync(src)) throw new Error(`快照不存在: ${safe}`);
   const text = fs.readFileSync(src, 'utf8');
-  writeConfigMutation(text, { source: 'history restore' });
+  let restored;
+  try { restored = TOML.parse(text); } catch (error) {
+    throw new Error(`history restore: TOML parse failed: ${error.message}`);
+  }
+  const providers = (restored.providers || []).map((provider) => ({ ...provider }));
+  const inlineMigrations = prepareLegacyInlineTokenMigrations(providers);
+  const safeText = replaceProvidersRegion(text, providers);
+  writeConfigMutation(safeText, {
+    source: 'history restore',
+    authorizedBearerProviderIds: inlineMigrations.map((migration) => migration.providerId),
+    afterWrite: inlineMigrations.length
+      ? () => {
+        for (const migration of inlineMigrations) saveEnvKey(migration.tokenEnv, migration.value);
+      }
+      : null,
+  });
   return safe;
 }
 
@@ -1305,13 +1340,59 @@ function mutateProviders(fn, mutationOptions = {}) {
   loadConfig();
   const providers = (cfg.providers || []).map((provider) => ({ ...provider }));
   const result = fn(providers);
+  const inlineMigrations = prepareLegacyInlineTokenMigrations(providers);
   const existing = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, 'utf8') : '';
   const text = replaceProvidersRegion(existing, providers);
+  const requestedAuthorized = mutationOptions.authorizedBearerProviderIds || [];
+  const requestedAfterWrite = mutationOptions.afterWrite;
   writeConfigMutation(text, {
     ...mutationOptions,
+    // Never duplicate a legacy plaintext token into a new history snapshot.
+    // The in-memory persistence state below still provides transactional rollback.
+    snapshot: inlineMigrations.length ? false : mutationOptions.snapshot,
+    authorizedBearerProviderIds: [
+      ...requestedAuthorized,
+      ...inlineMigrations.map((migration) => migration.providerId),
+    ],
+    afterWrite: inlineMigrations.length || requestedAfterWrite
+      ? () => {
+        for (const migration of inlineMigrations) saveEnvKey(migration.tokenEnv, migration.value);
+        if (requestedAfterWrite) requestedAfterWrite();
+      }
+      : null,
     source: 'provider mutation',
   });
   return result;
+}
+
+function migrationTokenEnv(provider, providers) {
+  const current = typeof provider.token_env === 'string' && ENV_NAME_RE.test(provider.token_env)
+    ? provider.token_env
+    : '';
+  if (current && !providers.some((entry) => entry !== provider && entry?.token_env === current)) return current;
+  const stem = String(provider.id || 'PROVIDER').toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  const base = `CODEX_SWITCH_${/^[A-Z_]/.test(stem) ? stem : `_${stem}`}_API_KEY`;
+  const used = new Set(providers.map((entry) => entry?.token_env).filter((name) => typeof name === 'string'));
+  let candidate = base;
+  let suffix = 1;
+  while (used.has(candidate)) {
+    suffix += 1;
+    candidate = `${base}_${suffix}`;
+  }
+  return candidate;
+}
+
+function prepareLegacyInlineTokenMigrations(providers) {
+  const migrations = [];
+  for (const provider of providers) {
+    if (!Object.hasOwn(provider || {}, 'token')) continue;
+    const value = validateEnvKeyValue(provider.token);
+    const tokenEnv = migrationTokenEnv(provider, providers);
+    provider.token_env = tokenEnv;
+    delete provider.token;
+    migrations.push({ providerId: String(provider.id || ''), tokenEnv, value });
+  }
+  return migrations;
 }
 
 function requireBearerCred(np) {
@@ -1322,7 +1403,7 @@ function requireBearerCred(np) {
 
 function submittedApiKey(input) {
   if (input.api_key === undefined) return '';
-  if (typeof input.api_key !== 'string' || input.api_key.length > 4096) throw new Error('API Key 格式无效');
+  try { validateEnvKeyValue(input.api_key); } catch { throw new Error('API Key 格式无效'); }
   return input.api_key.trim();
 }
 
@@ -1506,7 +1587,7 @@ function safeProviderOptions(providerType, value) {
 function projectProviderForAdmin(provider) {
   const inferredType = String(provider.provider_type || '').trim() || inferProviderType(provider.base_url);
   let normalized = null;
-  try { normalized = normalizeProvider(provider); } catch { /* Existing malformed entries remain visible but are not trusted. */ }
+  try { normalized = normalizeProviderForLoad(provider); } catch { /* Existing malformed entries remain visible but are not trusted. */ }
   const providerType = normalized?.provider_type || inferredType;
   const output = {
     id: String(provider.id || ''),
@@ -1521,6 +1602,21 @@ function projectProviderForAdmin(provider) {
   };
   if (provider.token_env) output.token_env = String(provider.token_env);
   return output;
+}
+
+function redactConfigForAdmin(value, key = '') {
+  if (key !== 'token_env'
+    && /token|secret|password|api[_-]?key|authorization|credential|private[_-]?key|access[_-]?key|cookie|oauth/i.test(key)) {
+    return '[redacted]';
+  }
+  if (Array.isArray(value)) return value.map((entry) => redactConfigForAdmin(entry));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+      childKey,
+      redactConfigForAdmin(childValue, childKey),
+    ]));
+  }
+  return value;
 }
 
 function parseDiscoveryInput(body) {
@@ -1623,16 +1719,6 @@ function updateMode() {
   return fs.existsSync(path.join(REPO_ROOT, '.git')) ? 'source' : 'unknown';
 }
 
-function cmpVersion(a, b) {
-  const pa = String(a).replace(/^v/, '').split('.').map((x) => parseInt(x, 10) || 0);
-  const pb = String(b).replace(/^v/, '').split('.').map((x) => parseInt(x, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const x = pa[i] || 0, y = pb[i] || 0;
-    if (x !== y) return x > y ? 1 : -1;
-  }
-  return 0;
-}
-
 // DoH(阿里 223.5.5.5)解析真实 IP,用于绕过本地 DNS 污染
 function dohResolve(host) {
   return new Promise((resolve, reject) => {
@@ -1707,15 +1793,10 @@ async function ghFetchJson(urlStr) {
 async function updateCheck() {
   try {
     const rel = await ghFetchJson('https://api.github.com/repos/' + GITHUB_REPO + '/releases/latest');
-    const latest = String(rel.tag_name || '').replace(/^v/, '');
-    const asset = (rel.assets || []).find((a) => /\.dmg$/i.test(a.name || '')) || null;
     return {
-      ok: true, mode: updateMode(), current: PKG_VERSION, latest,
-      newer: cmpVersion(latest, PKG_VERSION) > 0,
-      assetName: asset ? asset.name : null,
-      assetUrl: asset ? asset.browser_download_url : null,
-      assetSize: asset ? (asset.size || 0) : 0,
-      releaseUrl: rel.html_url || '',
+      ok: true,
+      mode: updateMode(),
+      ...summarizeReleaseUpdate(rel, PKG_VERSION),
     };
   } catch (e) {
     return { ok: false, error: '检查更新失败: ' + e.message, current: PKG_VERSION, mode: updateMode() };
@@ -1746,6 +1827,37 @@ function startUpdate() {
   return { ok: true, mode };
 }
 
+function runPackagedInstaller(command) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let progressWindow = '';
+    const child = spawn(command.file, command.args, {
+      env: buildInstallerEnvironment(process.env, allowedEnvNames()),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve();
+    };
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      progressWindow = (progressWindow + chunk).slice(-1024);
+      if (progressWindow.includes('挂载 DMG') || progressWindow.includes('安装到')) {
+        updateState.phase = 'installing';
+        updateState.pct = 100;
+        updateState.detail = '已校验安装包，正在原子替换应用…';
+      }
+    });
+    // Installer diagnostics may contain local paths. Drain them so the child
+    // cannot block, but expose only stable status text through the admin API.
+    child.stderr.resume();
+    child.once('error', () => finish(new Error('安全安装器无法启动')));
+    child.once('close', (code) => finish(code === 0 ? null : new Error(`安全安装器失败(exit ${code ?? 'unknown'})`)));
+  });
+}
+
 async function runUpdatePipeline(mode) {
   updateState.phase = 'checking'; updateState.pct = 0; updateState.downloaded = 0; updateState.total = 0;
   updateState.detail = '正在查询最新版本…';
@@ -1753,57 +1865,18 @@ async function runUpdatePipeline(mode) {
   if (chk.ok === false) throw new Error(chk.error);
   if (!chk.newer) { updateState.phase = 'idle'; updateState.detail = ''; throw new Error('当前已是最新版本 v' + chk.current); }
   if (mode === 'source') return runSourceUpdate();
-  if (!chk.assetUrl) throw new Error('该 Release 未附带 DMG 安装包');
 
   updateState.phase = 'downloading';
-  updateState.detail = '正在下载 ' + chk.assetName + ' …';
-  const dlDir = path.join(os.homedir(), '.codex-switch', 'downloads');
-  fs.mkdirSync(dlDir, { recursive: true });
-  const dest = path.join(dlDir, chk.assetName);
-  const tmp = dest + '.part';
-  const res = await ghFetch(chk.assetUrl, { timeout: 20000 });
-  if (res.statusCode !== 200) { res.resume(); throw new Error('下载失败: HTTP ' + res.statusCode); }
-  updateState.total = parseInt(res.headers['content-length'] || '0', 10) || chk.assetSize || 0;
-  await new Promise((resolve, reject) => {
-    const ws = fs.createWriteStream(tmp);
-    res.on('data', (c) => {
-      updateState.downloaded += c.length;
-      if (updateState.total > 0) updateState.pct = Math.min(99, Math.floor((updateState.downloaded / updateState.total) * 100));
-    });
-    res.on('error', reject);
-    ws.on('error', reject);
-    ws.on('finish', resolve);
-    res.pipe(ws);
-  });
-  fs.renameSync(tmp, dest);
+  updateState.detail = chk.assetsReady
+    ? '正在下载并校验精确版本的 DMG 与 checksum…'
+    : 'Release 资产仍在构建，正在等待精确 DMG 与 checksum…';
+  await runPackagedInstaller(buildInstallerCommand(REPO_ROOT, chk.tag));
+
   updateState.pct = 100;
-
-  updateState.phase = 'installing';
-  updateState.detail = '正在安装到 /Applications…';
-  await installDmg(dest);
-
   updateState.phase = 'done';
   updateState.detail = '更新完成,正在重启应用…';
   const child = spawn('/bin/sh', ['-c', 'sleep 1; kill ' + process.pid + ' 2>/dev/null; sleep 1; open "/Applications/Codex Switch.app"'], { detached: true, stdio: 'ignore' });
   child.unref();
-}
-
-async function installDmg(dmgPath) {
-  const APP = 'Codex Switch';
-  const out = await execFileP('hdiutil', ['attach', dmgPath, '-nobrowse', '-readonly', '-plist']);
-  const m = out.match(/<string>(\/Volumes\/[^<]+)<\/string>/);
-  if (!m) throw new Error('无法解析 DMG 挂载点');
-  const mount = m[1];
-  try {
-    const src = path.join(mount, APP + '.app');
-    if (!fs.existsSync(src)) throw new Error('DMG 内未找到 ' + APP + '.app');
-    const dst = '/Applications/' + APP + '.app';
-    fs.rmSync(dst, { recursive: true, force: true });
-    await execFileP('cp', ['-R', src, '/Applications/']);
-    await execFileP('xattr', ['-cr', dst]).catch(() => {});
-  } finally {
-    await execFileP('hdiutil', ['detach', mount]).catch(() => {});
-  }
 }
 
 async function runSourceUpdate() {
@@ -1863,12 +1936,7 @@ async function handleAdmin(req, bodyBuf, res) {
         const id = String(url.searchParams.get('id') || '');
         const prov = (c.providers || []).find((x) => x.id === id);
         if (!prov) return sendJson(res, 404, { error: 'not found', id });
-        const out = { ...prov };
-        let apiKey = '';
-        if (prov.token_env) apiKey = readEnvFileEntries().get(prov.token_env) || process.env[prov.token_env] || '';
-        else if (prov.token) apiKey = prov.token; // 旧版内联 token:导出以便迁移到 env
-        delete out.token; // 常规字段永不带明文;api_key 仅此显式导出端点返回
-        return sendJson(res, 200, { ok: true, provider: { ...out, api_key: apiKey } });
+        return sendJson(res, 200, { ok: true, provider: projectProviderForAdmin(prov) });
       }
       if (req.method === 'GET' && p === '/__admin/providers') {
         const c = getConfig();
@@ -2007,8 +2075,12 @@ async function handleAdmin(req, bodyBuf, res) {
   // ---------- raw config / capabilities ----------
   if (req.method === 'GET' && p === '/__admin/config') {
     const text = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, 'utf8') : '';
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-    return res.end(text);
+    try {
+      const parsed = text ? TOML.parse(text) : {};
+      return sendJson(res, 200, { ok: true, config: redactConfigForAdmin(parsed) });
+    } catch {
+      return sendJson(res, 500, { error: 'config projection failed' });
+    }
   }
   if (req.method === 'POST' && p === '/__admin/config') {
     const text = bodyBuf.toString('utf8');

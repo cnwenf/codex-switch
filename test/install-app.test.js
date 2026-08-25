@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -10,6 +11,8 @@ const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const INSTALLER = path.join(REPO_ROOT, 'scripts', 'install-app.sh');
 const BUILD_SCRIPT = path.join(REPO_ROOT, 'scripts', 'build-macos-app.sh');
 const WORKFLOW = path.join(REPO_ROOT, '.github', 'workflows', 'release-dmg.yml');
+const APP_BUNDLE_INSTALLER = path.join(REPO_ROOT, 'scripts', 'install-app-bundle.cjs');
+const require = createRequire(import.meta.url);
 
 const ACTION_SHAS = {
   checkout: '3d3c42e5aac5ba805825da76410c181273ba90b1',
@@ -86,6 +89,7 @@ test('macOS build stages the lockfile and installs production dependencies repro
   const buildScript = fs.readFileSync(BUILD_SCRIPT, 'utf8');
 
   assert.match(buildScript, /cp package\.json package-lock\.json config\.toml "\$RES\/app\/"/);
+  assert.match(buildScript, /cp scripts\/install-app\.sh scripts\/install-app-bundle\.cjs "\$RES\/app\/scripts\/"/);
   assert.match(buildScript, /npm ci --omit=dev --ignore-scripts --no-fund --no-audit --loglevel=error/);
   assert.doesNotMatch(buildScript, /npm install --omit=dev/);
 });
@@ -387,6 +391,63 @@ function readLog(filename) {
   if (!fs.existsSync(filename)) return [];
   return fs.readFileSync(filename, 'utf8').trim().split('\n').filter(Boolean);
 }
+
+function loadAppBundleInstaller() {
+  assert.equal(fs.existsSync(APP_BUNDLE_INSTALLER), true);
+  const module = require(APP_BUNDLE_INSTALLER);
+  assert.equal(typeof module.installAppBundle, 'function');
+  return module.installAppBundle;
+}
+
+function createBundleSwapFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-bundle-swap-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'Applications'), { recursive: true });
+  const physicalParent = fs.realpathSync(path.join(root, 'Applications'));
+  const sourceApp = path.join(root, 'Mounted', 'Codex Switch.app');
+  const destination = path.join(physicalParent, 'Codex Switch.app');
+  fs.mkdirSync(sourceApp, { recursive: true });
+  fs.mkdirSync(destination);
+  fs.writeFileSync(path.join(sourceApp, 'version'), 'new');
+  fs.writeFileSync(path.join(destination, 'version'), 'old');
+  return { root, physicalParent, sourceApp, destination };
+}
+
+test('shared app-bundle installer stages and atomically replaces a validated destination', (t) => {
+  const installAppBundle = loadAppBundleInstaller();
+  const fixture = createBundleSwapFixture(t);
+  installAppBundle(fixture);
+  assert.equal(fs.readFileSync(path.join(fixture.destination, 'version'), 'utf8'), 'new');
+  assert.deepEqual(
+    fs.readdirSync(fixture.physicalParent).filter((name) => name.startsWith('.codex-switch-')),
+    [],
+  );
+});
+
+test('shared app-bundle installer preserves the live app when staging copy fails', (t) => {
+  const installAppBundle = loadAppBundleInstaller();
+  const fixture = createBundleSwapFixture(t);
+  const failingFs = { ...fs, cpSync() { throw new Error('fixture copy failure'); } };
+  assert.throws(() => installAppBundle({ ...fixture, fsImpl: failingFs }), /copy failure/);
+  assert.equal(fs.readFileSync(path.join(fixture.destination, 'version'), 'utf8'), 'old');
+});
+
+test('shared app-bundle installer rolls the previous app back when the final rename fails', (t) => {
+  const installAppBundle = loadAppBundleInstaller();
+  const fixture = createBundleSwapFixture(t);
+  let renameCount = 0;
+  const failingFs = {
+    ...fs,
+    renameSync(...args) {
+      renameCount += 1;
+      if (renameCount === 2) throw new Error('fixture rename failure');
+      return fs.renameSync(...args);
+    },
+  };
+  assert.throws(() => installAppBundle({ ...fixture, fsImpl: failingFs }), /rename failure/);
+  assert.equal(fs.readFileSync(path.join(fixture.destination, 'version'), 'utf8'), 'old');
+  assert.equal(fs.readdirSync(fixture.physicalParent).some((name) => name.startsWith('.codex-switch-backup.')), false);
+});
 
 async function startDeadlineHttpServer(t, root) {
   const serverFile = path.join(root, 'deadline-server.cjs');

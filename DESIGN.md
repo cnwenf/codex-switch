@@ -112,7 +112,7 @@ enabled = true
 
 `provider_type` 是稳定 adapter 身份，`provider_options` 保存厂商连接参数，`base_url` 保留给旧代码和转发路径。写入时 base URL 必须由 registry 重新派生，不能使用浏览器伪造值。
 
-`provider_options` 只接受字符串、布尔值和有限数字。管理页新增或轮换的 Key 写入 `~/.codex-switch/env`（mode `0600`），新 provider 在 `config.toml` 中只引用 `token_env`。为向后兼容，legacy / 旧版 inline `token` 仍可解析、序列化，并在缺少 env 值时作为 bearer fallback；显式导出也能带出它以便迁移。inline token 会让明文留在配置和备份中，应迁移到 env 文件后移除，不能把兼容能力理解为推荐存储方式。
+`provider_options` 只接受字符串、布尔值和有限数字。管理页新增或轮换的 Key 写入 `~/.codex-switch/env`（mode `0600`），新 provider 在 `config.toml` 中只引用 `token_env`。legacy / 旧版 inline `token` 只作为服务端加载兼容输入，在 provider 被修改或历史被恢复时事务性迁移到 env；序列化、HTTP/clipboard 导出和新 mutation 都不会接收或产生 inline token，迁移时也不会把明文复制到新历史快照。
 
 旧 provider 若没有新字段仍可加载；已存在的 Bailian 配置不会因升级被删除。仓库和新 DMG 的 `config.toml` 默认只有 ChatGPT 订阅 provider。
 
@@ -166,11 +166,11 @@ adapter table 隔离异构 API：
 - Ark/Azure 必须选择用户手工输入的 Endpoint/Deployment ID；静态参考模型不可选择成路由。
 - Custom、静态目录和已有 provider 可在明确的 unverified 状态下保存；UI 会说明首次调用为准。
 
-新增 bearer provider 必须在同一次 JSON 保存请求中提交新的 `api_key`；即使请求给出的 `token_env` 在当前进程中已有值，服务端也不会借用或重新绑定它。`token_env` 在配置规范化入口必须已经是符合 `[A-Za-z_][A-Za-z0-9_]*` 的 canonical 名称，前后空白和其他字符不会被静默 trim，而是直接拒绝；配置加载、供应商 CRUD、raw config 和历史恢复共用这条门禁。编辑只有在规范化后的完整连接身份（`provider_type`、authoritative `base_url`、`provider_options`）、实际持久化的 runtime `base_url`、认证类型和原 `token_env` 均未改变时，才可沿用已保存 Key。连接、`token_env` 或 legacy inline `token` 变化必须原子携带新 Key。
+新增 bearer provider 必须在同一次 JSON 保存请求中提交新的 `api_key`；即使请求给出的 `token_env` 在当前进程中已有值，服务端也不会借用或重新绑定它。`token_env` 在配置规范化入口必须已经是符合 `[A-Za-z_][A-Za-z0-9_]*` 的 canonical 名称，前后空白和其他字符不会被静默 trim，而是直接拒绝；配置加载、供应商 CRUD、raw config 和历史恢复共用这条门禁。编辑只有在规范化后的完整连接身份（`provider_type`、authoritative `base_url`、`provider_options`）、实际持久化的 runtime `base_url`、认证类型和原 `token_env` 均未改变时，才可沿用已保存 Key。连接或 `token_env` 变化必须原子携带新 Key；服务端已持有的 legacy inline token 例外地只允许在同一事务中迁移到 env。
 
 所有配置写入由 `writeConfigMutation` 自己持有事务快照和回滚，不依赖调用方是否已经拿到返回值。config 写入或热加载、env 文件写入、`process.env` 更新以及缓存失效的任一步失败，都会恢复原 config、env 文件、完整进程环境、provider generation、refresh lease、全局批次 epoch，以及 capability cache 原有 metadata 和 TTL；add、update、raw config 与历史恢复走相同语义。
 
-`POST /__admin/config` 是 `text/plain`，配置历史恢复也只有 TOML 快照，两者都没有同请求 `api_key` 字段。因此这两个入口允许修改名称、模型、启停等非凭据字段，但对新增 bearer、把现有 provider 改成 bearer、改 bearer runtime/规范化连接、重绑 `token_env` 或修改 inline `token` 一律 fail closed 为 400；需要这些变化时必须走 provider JSON 保存入口。`GET /__admin/config`、非凭据 raw import 和安全的历史恢复保持兼容。
+`POST /__admin/config` 是 `text/plain`，没有同请求 `api_key` 字段。因此它允许修改名称、模型、启停等非凭据字段，但对新增 bearer、把现有 provider 改成 bearer、改 bearer runtime/规范化连接、重绑 `token_env` 或提交 inline `token` 一律 fail closed 为 400；需要这些变化时必须走 provider JSON 保存入口。历史恢复同样执行身份门禁，唯一例外是把快照里服务端既有的 inline token 原子迁移到 env。`GET /__admin/config` 只返回结构化脱敏投影，不返回原 TOML 或任何凭证值。
 
 ## 10. 能力规范化与缓存优先级
 
@@ -204,18 +204,19 @@ adapter table 隔离异构 API：
 
 ## 11. 安全限制
 
-默认配置将整个 server 绑定到 `127.0.0.1:8787`，发现服务与管理 API 因此只在本机可达。`proxy.listen` 是可手工修改的配置，server 当前不会强制 loopback，管理 API 是无认证管理面：若改到非 loopback / 非回环地址，provider CRUD、Codex 配置操作和显式 Key 导出都会暴露给该网络，存在远程配置篡改和凭据泄露风险，强烈禁止这样部署。以下安全边界均以保留默认 loopback bind 为前提：
+默认配置将整个 server 绑定到 `127.0.0.1:8787`，发现服务与管理 API 因此只在本机可达。`proxy.listen` 是可手工修改的配置，server 当前不会强制 loopback，管理 API 是无认证管理面：若改到非 loopback / 非回环地址，provider CRUD 和 Codex 配置操作都会暴露给该网络，存在远程配置篡改风险，强烈禁止这样部署。以下安全边界均以保留默认 loopback bind 为前提：
 
 - Key 只从 POST body 进入内存和上游 `Authorization`；不写 URL、不进日志，不拼入错误信息。
 - 编辑页不回填已保存 Key；发现结果、warning 和错误正文均脱敏。包含完整 Key 的模型 ID/name/metadata 会整条丢弃。
-- 管理页新写入的持久 Key 位于 `~/.codex-switch/env`，mode `0600`；新配置只保存 `token_env` 名称。legacy inline `token` 仍为向后兼容可解析/序列化，必须迁移，不能视为安全默认值。
-- “复制为 JSON”是用户明确触发的敏感导出，可能把 Key 放入剪贴板；它不属于自动发现或普通编辑回显。
-- preset URL 由服务端重算；Custom/NIM 仅允许 HTTPS 或 loopback HTTP。
+- 管理页新写入的持久 Key 位于 `~/.codex-switch/env`，mode `0600`；新配置只保存 `token_env` 名称。legacy inline `token` 仅能由服务端加载，并在触碰时迁移；不会再被序列化、返回或复制到新历史快照。
+- “复制为 JSON”只复制 provider metadata；导入后 Key 必须重新输入。raw config GET 同样只返回结构化脱敏投影。
+- preset URL 与 auth 由服务端 registry 重算/固定；Custom/NIM 仅允许 bearer 与 HTTPS 或 loopback HTTP。ChatGPT subscription/OAuth 只允许 dedicated provider 和精确 ChatGPT Codex base path。
+- legacy passthrough 仅允许 loopback 或 registry 能规范化并精确回算的 fixed/derived 官方 endpoint；未知任意 HTTPS fail closed，不能收到入站 `Authorization`。legacy bearer 仍按 Custom 的安全 URL policy 保留。
 - 跳转最多 3 次，必须保持同 origin 和同 destination class；公网不能跳到 loopback，凭证不能跨 origin。
 - 初始 URL、redirect、pagination link、cursor/path/query/fragment 都检查原始及最多三层 percent decoding，畸形或过深编码 fail closed。
 - 单请求超时 10 秒；JSON response 最多 4 MiB；最多 5 页、2,000 个模型。越界时立即取消 reader 并返回稳定错误。
 - 上游错误正文和内部 stack 不返回浏览器；HTTP 状态映射成固定 validation state/message。
-- 源码启动器、打包 Swift launcher 和打包 shell fallback 都以 `--use-system-ca` 启动 Node；Node 自行叠加内置根证书、macOS 系统证书库和调用方已有的 `NODE_EXTRA_CA_CERTS`。源码运行要求 Node.js 22.15.0+，打包版固定 Node.js 22.23.2；启动器不生成或发布本地 CA bundle 与 scratch 文件。
+- 源码启动器、打包 Swift launcher 和打包 shell fallback 都以 `--use-system-ca` 启动 Node；Node 自行叠加内置根证书、macOS 系统证书库和调用方已有的 `NODE_EXTRA_CA_CERTS`。源码安装器实际探测该参数（声明范围为 `>=22.15.0 <23 || >=23.8.0`），打包版固定 Node.js 22.23.2；启动器不生成或发布本地 CA bundle 与 scratch 文件。
 - DMG 安装先把应用复制到已规范化 Applications 父目录内的随机 staging，再用 DMG 内置 Node 的 `rename(2)` 将旧目标移到同目录随机 backup、把 staging 原子改名为最终 `.app`；最终路径若在校验后被换成 symlink，只移动/替换链接本身，不跟随到链接目标。清理只作用于安装器自己在该父目录创建的随机 staging/backup 和下载临时目录。断电或恶意并发导致第二次 rename 失败时安装会 fail closed，并可能保留随机 backup 供手工恢复；这里不宣称跨断电事务。
 
 这些限制降低 SSRF、Bearer 跨域转发、无限分页、内存放大和错误正文泄密风险。它们不把未验证的 Custom endpoint 升级成可信厂商。

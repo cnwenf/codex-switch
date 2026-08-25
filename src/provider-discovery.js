@@ -519,6 +519,13 @@ async function readBoundedResponse(response, signal) {
   return bytes;
 }
 
+function cancelUnreadResponse(response) {
+  if (!response?.body) return;
+  try {
+    Promise.resolve(response.body.cancel()).catch(() => {});
+  } catch { /* An untrusted stream may throw synchronously from cancel. */ }
+}
+
 async function requestJson(context, initialUrl) {
   let url = validateDiscoveryUrl(initialUrl, context.providerType);
   if (urlContainsExactSecret(url, context.apiKey)) throw new DiscoverySafetyError('unsafe_url');
@@ -538,6 +545,7 @@ async function requestJson(context, initialUrl) {
     }
     if (!(response instanceof Response)) throw new DiscoverySafetyError('invalid_response');
     if ([301, 302, 303, 307, 308].includes(response.status)) {
+      cancelUnreadResponse(response);
       if (redirects >= MAX_REDIRECTS) throw new DiscoverySafetyError('redirect_limit');
       const location = response.headers.get('location');
       if (!location) throw new DiscoverySafetyError('unsafe_redirect');
@@ -554,9 +562,13 @@ async function requestJson(context, initialUrl) {
       url = next;
       continue;
     }
-    if (!response.ok) throw new DiscoveryHttpError(response.status);
+    if (!response.ok) {
+      cancelUnreadResponse(response);
+      throw new DiscoveryHttpError(response.status);
+    }
     const contentLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) {
+      cancelUnreadResponse(response);
       throw new DiscoverySafetyError('response_too_large');
     }
     const bytes = await readBoundedResponse(response, context.signal);

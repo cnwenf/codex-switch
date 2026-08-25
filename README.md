@@ -101,7 +101,7 @@ App 默认用 macOS LaunchAgent 在登录时启动，菜单栏可查看状态、
 
 ### 源码安装
 
-需要 Node.js 22.15.0+（该版本起支持 `--use-system-ca`）：
+需要支持 `--use-system-ca` 的 Node.js（`>=22.15.0 <23` 或 `>=23.8.0`）；安装脚本会实际探测该参数：
 
 ```sh
 git clone https://github.com/cnwenf/codex-switch.git
@@ -127,13 +127,14 @@ v0.5.0 的管理页采用浅色冷灰画布、不透明表面和单一蓝色主�
 
 ## 安全边界
 
-- 默认配置把服务绑定到 `127.0.0.1:8787`；这才是管理页、发现 API 和 Key 操作的安全部署边界。若手工把 `proxy.listen` 改到非 loopback / 非回环地址，无认证管理面和显式 Key 导出接口都会暴露给该网络，存在配置篡改和凭据泄露风险，强烈禁止这样部署。
+- 默认配置把服务绑定到 `127.0.0.1:8787`；这才是管理页、发现 API 和 Key 操作的安全部署边界。若手工把 `proxy.listen` 改到非 loopback / 非回环地址，无认证管理面会暴露给该网络，存在配置篡改风险，强烈禁止这样部署。
 - 固定和动态厂商 URL 由服务端 registry 重新解析，浏览器提交的派生 URL 不是权威值。
 - Custom 和 NIM 只允许 HTTPS，或 loopback HTTP；发现请求限制同源跳转并阻止公网/loopback 目标类别切换，降低 SSRF 与凭证转发风险。
 - 每个发现请求 10 秒超时，响应最多 4 MiB，最多 3 次同源跳转、5 页和 2,000 个模型；上游正文、堆栈和包含 Key 的模型字段不会返回。
-- API Key 只通过管理 POST body 参与检测，不进入 URL 或日志。管理页新增/轮换的 Key 位于 `~/.codex-switch/env`（mode `0600`），新配置只保存环境变量名。旧版 `config.toml` 的 inline `token` 仍能兼容读取，应尽快迁移到 env 文件并移除明文。
+- API Key 只通过管理 POST body 参与检测，不进入 URL 或日志。管理页新增/轮换的 Key 位于 `~/.codex-switch/env`（mode `0600`），新配置只保存环境变量名。旧版 `config.toml` 的 inline `token` 仅作服务端读取兼容；该 provider 一旦被修改就会在同一事务中迁移到 env，且不会再写回配置或历史快照。
 - 上游连接失败的 502 只返回稳定的脱敏 `code`，并在 `run.log` 记录同一个 code；不会返回或记录上游 URL、异常 message、header 或凭证。当前公开码包括 `EMFILE`、`ECONNRESET`、`ETIMEDOUT`、`ENOTFOUND`、`EAI_AGAIN`、`TLS_CERT`，其他原因统一为 `UNKNOWN`。
-- 正常列表、编辑和检测遵守“Key 不回显”：不会回填已保存值。现有“复制为 JSON”是明确的敏感导出操作，可能把 Key 写入剪贴板；页面会标注“含 API Key，勿外传”。
+- 列表、编辑、检测、raw config 投影和“复制为 JSON”都遵守“Key 不回显”：剪贴板只含 provider metadata；导入后必须重新填写 Key。
+- 认证类型和官方 preset URL 由服务端 registry 固定。ChatGPT subscription/OAuth 只允许精确的 ChatGPT Codex endpoint；legacy passthrough 只保留 loopback 与 registry 可精确重建的官方 origin，未知 HTTPS 不会收到入站 `Authorization`。
 - Codex 的 `~/.codex/auth.json` 和 `~/.codex/config.toml` 只读或手术式合并；应用前自动备份，可一键还原，不覆盖无关配置。
 
 ## 工作原理

@@ -7,9 +7,12 @@ const GROUPS = Object.freeze({
 
 const COMPATIBILITY_NOTES = Object.freeze({
   unsupported: '未验证官方 Responses 直连支持；可改用 OpenRouter 或已验证的自定义网关。',
+  unverified: 'Responses 兼容性尚未验证；请只在你信任的端点完成实际连接与模型验证后使用。',
   limited: 'Responses 支持存在已知限制，请在实际使用前验证模型与参数。',
   beta: 'Responses API 仍处于 Beta 阶段。',
 });
+
+export const CHATGPT_CODEX_BASE_URL = 'https://chatgpt.com/backend-api/codex';
 
 const UNSUPPORTED_PROVIDERS = Object.freeze([
   ['kimi', 'Kimi（月之暗面）'],
@@ -50,13 +53,14 @@ function preset(definition) {
     options: [],
     requiresManualModel: false,
     ...definition,
-    routable: isRoutableCompatibility(definition.compatibility),
+    routable: definition.routable ?? isRoutableCompatibility(definition.compatibility),
   };
   entry.public = projectPublic(entry);
   return freeze(entry);
 }
 
 export const PROVIDER_PRESETS = freeze([
+  preset({ id: 'chatgpt-sub', name: 'ChatGPT 订阅', group: GROUPS.direct, compatibility: 'supported', auth: 'chatgpt_subscription', tokenEnv: '', baseUrl: CHATGPT_CODEX_BASE_URL }),
   preset({ id: 'openai', name: 'OpenAI API', group: GROUPS.direct, compatibility: 'supported', tokenEnv: 'OPENAI_API_KEY', baseUrl: 'https://api.openai.com/v1' }),
   preset({ id: 'xai', name: 'xAI', group: GROUPS.direct, compatibility: 'supported', tokenEnv: 'XAI_API_KEY', baseUrl: 'https://api.x.ai/v1' }),
   preset({ id: 'openrouter', name: 'OpenRouter', group: GROUPS.direct, compatibility: 'supported', tokenEnv: 'OPENROUTER_API_KEY', baseUrl: 'https://openrouter.ai/api/v1' }),
@@ -69,9 +73,9 @@ export const PROVIDER_PRESETS = freeze([
   preset({ id: 'aws-bedrock', name: 'AWS Bedrock', group: GROUPS.cloud, compatibility: 'supported', tokenEnv: 'AWS_BEDROCK_API_KEY', options: [{ name: 'region', type: 'text', default: 'us-east-1' }], buildBaseUrl: ({ region }) => `https://bedrock-mantle.${region}.api.aws/v1` }),
   preset({ id: 'azure-openai', name: 'Azure OpenAI / Microsoft Foundry', group: GROUPS.cloud, compatibility: 'supported', tokenEnv: 'AZURE_OPENAI_API_KEY', options: [{ name: 'resource_endpoint', type: 'url', default: '' }], buildBaseUrl: ({ resource_endpoint: endpoint }) => `${endpoint}/openai/v1`, requiresManualModel: true }),
   preset({ id: 'cloudflare-workers-ai', name: 'Cloudflare Workers AI', group: GROUPS.cloud, compatibility: 'limited', tokenEnv: 'CLOUDFLARE_API_TOKEN', options: [{ name: 'account_id', type: 'text', default: '' }], buildBaseUrl: ({ account_id: accountId }) => `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1` }),
-  preset({ id: 'nvidia-nim', name: 'NVIDIA NIM（自托管）', group: GROUPS.cloud, compatibility: 'limited', tokenEnv: 'NVIDIA_NIM_API_KEY', options: [{ name: 'base_url', type: 'url', default: 'http://127.0.0.1:8000/v1' }] }),
+  preset({ id: 'nvidia-nim', name: 'NVIDIA NIM（自托管）', group: GROUPS.cloud, compatibility: 'unverified', routable: true, tokenEnv: 'NVIDIA_NIM_API_KEY', options: [{ name: 'base_url', type: 'url', default: 'http://127.0.0.1:8000/v1' }] }),
   ...UNSUPPORTED_PROVIDERS.map(([id, name]) => preset({ id, name, group: GROUPS.unsupported, compatibility: 'unsupported', tokenEnv: '' })),
-  preset({ id: 'custom', name: '自定义', group: GROUPS.custom, compatibility: 'limited', tokenEnv: 'CUSTOM_API_KEY', options: [{ name: 'base_url', type: 'url', default: '' }] }),
+  preset({ id: 'custom', name: '自定义', group: GROUPS.custom, compatibility: 'unverified', routable: true, tokenEnv: 'CUSTOM_API_KEY', options: [{ name: 'base_url', type: 'url', default: '' }] }),
 ]);
 
 const PRESETS_BY_ID = new Map(PROVIDER_PRESETS.map((entry) => [entry.id, entry]));
@@ -96,7 +100,12 @@ export function listProviderPresets() {
 
 export function inferProviderType(baseUrl) {
   try {
-    const hostname = new URL(String(baseUrl)).hostname.toLowerCase();
+    const url = new URL(String(baseUrl));
+    const hostname = url.hostname.toLowerCase();
+    if (normalizeUrlForComparison(url) === CHATGPT_CODEX_BASE_URL) return 'chatgpt-sub';
+    if ((hostname.endsWith('.openai.azure.com') || hostname.endsWith('.services.ai.azure.com'))
+      && ['/openai/v1', '/openai/v1/'].includes(url.pathname)
+      && !url.search && !url.hash && !url.username && !url.password) return 'azure-openai';
     if (/^bedrock-mantle\.[a-z]{2}(?:-[a-z]+)+-\d+\.api\.aws$/.test(hostname)) return 'aws-bedrock';
     if (/^[a-z0-9_-]+\.(?:cn-beijing|ap-southeast-1|us-east-1)\.maas\.aliyuncs\.com$/.test(hostname)) return 'bailian';
     for (const [host, type] of HOST_TYPES) {
@@ -104,6 +113,78 @@ export function inferProviderType(baseUrl) {
     }
   } catch { /* Existing malformed URLs fall back to Custom. */ }
   return 'custom';
+}
+
+export function inferProviderOptions(providerType, baseUrl) {
+  let url;
+  try {
+    url = new URL(String(baseUrl || ''));
+  } catch {
+    return {};
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (providerType === 'aws-bedrock') {
+    const match = hostname.match(/^bedrock-mantle\.([a-z]{2}(?:-[a-z]+)+-\d+)\.api\.aws$/);
+    return match ? { region: match[1] } : {};
+  }
+  if (providerType === 'bailian') {
+    const workspace = hostname.match(/^([a-z0-9_-]+)\.(cn-beijing|ap-southeast-1|us-east-1)\.maas\.aliyuncs\.com$/i);
+    if (workspace) return { region: workspace[2], workspace_id: workspace[1] };
+    const region = {
+      'dashscope.aliyuncs.com': 'cn-beijing',
+      'dashscope-intl.aliyuncs.com': 'ap-southeast-1',
+      'dashscope-us.aliyuncs.com': 'us-east-1',
+    }[hostname];
+    return region ? { region, workspace_id: '' } : {};
+  }
+  if (providerType === 'tencent-tokenhub') {
+    return { site: hostname === 'tokenhub-intl.tencentcloudmaas.com' ? 'intl' : 'cn' };
+  }
+  if (providerType === 'cloudflare-workers-ai') {
+    const match = url.pathname.match(/^\/client\/v4\/accounts\/([A-Za-z0-9_-]+)\/ai\/v1\/?$/);
+    return match ? { account_id: match[1] } : {};
+  }
+  if (providerType === 'azure-openai') {
+    return { resource_endpoint: `${url.protocol}//${url.host}` };
+  }
+  if (providerType === 'nvidia-nim') return { base_url: String(baseUrl) };
+  return {};
+}
+
+function isLoopbackHost(hostname) {
+  return hostname === 'localhost'
+    || hostname === '::1'
+    || hostname === '[::1]'
+    || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+}
+
+function normalizeUrlForComparison(value) {
+  const url = value instanceof URL ? value : new URL(String(value));
+  if (url.username || url.password || url.search || url.hash) throw new Error('URL contains untrusted components');
+  return `${url.protocol}//${url.host}${url.pathname}`.replace(/\/$/, '');
+}
+
+// Legacy passthrough may keep inbound Authorization only for a local endpoint
+// or for a registry URL that round-trips to one exact official connection.
+export function isTrustedLegacyPassthroughUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value));
+    if (url.username || url.password || url.search || url.hash) return false;
+  } catch {
+    return false;
+  }
+  if (isLoopbackHost(url.hostname) && (url.protocol === 'http:' || url.protocol === 'https:')) return true;
+  if (url.protocol !== 'https:') return false;
+  const providerType = inferProviderType(url);
+  const provider = getProviderPreset(providerType);
+  if (!provider || !provider.routable || ['custom', 'nvidia-nim'].includes(provider.id)) return false;
+  try {
+    const resolved = resolveProviderConnection(provider.id, inferProviderOptions(provider.id, url), String(url));
+    return normalizeUrlForComparison(url) === normalizeUrlForComparison(resolved.baseUrl);
+  } catch {
+    return false;
+  }
 }
 
 export function resolveProviderConnection(providerType, providerOptions = {}, customBaseUrl = '') {

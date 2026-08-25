@@ -19,6 +19,22 @@ const percentEncode = (value, depth) => {
   return encoded;
 };
 
+function cancellableResponse(status, headers = {}) {
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"pending":true}'));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  return {
+    response: new Response(body, { status, headers }),
+    wasCancelled: () => cancelled,
+  };
+}
+
 test('OpenRouter validation and user models normalize capabilities', async () => {
   const calls = [];
   const result = await discoverProvider({
@@ -428,6 +444,46 @@ test('cross-origin redirects cannot forward the bearer key', async () => {
   assert.equal(calls.length, 1);
   assert.equal(result.validation.status, 'unreachable');
   assert.equal(JSON.stringify(result).includes('fixture-redirect-key'), false);
+});
+
+test('redirect responses cancel their unread body before discovery follows the next URL', async () => {
+  const redirect = cancellableResponse(302, { location: '/v1/models-final' });
+  let calls = 0;
+  const result = await discoverProvider({
+    providerType: 'custom', baseUrl: 'https://gateway.example.test/v1', apiKey: 'fixture-cancel-redirect-key',
+  }, {
+    fetchImpl: async () => {
+      calls += 1;
+      return calls === 1 ? redirect.response : response(200, { data: [{ id: 'fixture-model' }] });
+    },
+  });
+  assert.equal(result.validation.status, 'valid');
+  assert.equal(redirect.wasCancelled(), true);
+});
+
+test('HTTP error responses cancel their unread body before returning a sanitized status', async () => {
+  const unauthorized = cancellableResponse(401, { 'content-type': 'application/json' });
+  const result = await discoverProvider({
+    providerType: 'openai', providerOptions: {}, apiKey: 'fixture-cancel-http-key',
+  }, {
+    fetchImpl: async () => unauthorized.response,
+  });
+  assert.equal(result.validation.status, 'invalid');
+  assert.equal(unauthorized.wasCancelled(), true);
+});
+
+test('declared oversized responses cancel their unread body before failing closed', async () => {
+  const oversized = cancellableResponse(200, {
+    'content-type': 'application/json',
+    'content-length': String(4 * 1024 * 1024 + 1),
+  });
+  const result = await discoverProvider({
+    providerType: 'openai', providerOptions: {}, apiKey: 'fixture-cancel-length-key',
+  }, {
+    fetchImpl: async () => oversized.response,
+  });
+  assert.equal(result.validation.status, 'unreachable');
+  assert.equal(oversized.wasCancelled(), true);
 });
 
 test('an API key embedded in the initial URL path is rejected before fetch', async () => {

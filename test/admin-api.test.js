@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
@@ -58,6 +58,8 @@ function providerBlock({
   enabled = false,
   providerType,
   providerOptions,
+  auth = 'bearer',
+  token,
   models = [],
 }) {
   const lines = [
@@ -74,8 +76,11 @@ function providerBlock({
   }
   lines.push(
     `base_url = ${JSON.stringify(baseUrl)}`,
-    'auth = "bearer"',
-    `token_env = ${JSON.stringify(tokenEnv)}`,
+    `auth = ${JSON.stringify(auth)}`,
+  );
+  if (tokenEnv) lines.push(`token_env = ${JSON.stringify(tokenEnv)}`);
+  if (token) lines.push(`token = ${JSON.stringify(token)}`);
+  lines.push(
     `models = [${models.map((model) => JSON.stringify(model)).join(', ')}]`,
     `enabled = ${enabled}`,
   );
@@ -155,6 +160,17 @@ async function postRawConfig(origin, text) {
   });
 }
 
+async function proxyJson(origin, model, authorization = '') {
+  return fetch(`${origin}/v1/responses`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(authorization ? { authorization } : {}),
+    },
+    body: JSON.stringify({ model, input: 'fixture input' }),
+  });
+}
+
 async function waitForProviderCache(origin, providerId, expectedStatus = 'fresh', timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -206,6 +222,227 @@ test('admin returns safe presets and discovers a Custom model', async (t) => {
   assert.equal(app.upstreamRequests.at(-1).authorization, `Bearer ${key}`);
   assert.equal(JSON.stringify(discovered).includes(key), false);
   assert.equal(app.output().includes(key), false);
+});
+
+test('provider export, raw config projection, and list responses never return legacy inline credentials', async (t) => {
+  const secret = "fixture-legacy-export-'credential";
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'legacy-inline',
+      token: secret,
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+  });
+  fs.appendFileSync(app.configPath, `\n[credentials]\nvalue = ${JSON.stringify(secret)}\n`);
+
+  for (const pathname of [
+    '/__admin/providers',
+    '/__admin/providers/export?id=legacy-inline',
+    '/__admin/config',
+  ]) {
+    const response = await fetch(`${app.origin}${pathname}`);
+    const body = await response.text();
+    assert.equal(response.status, 200, pathname);
+    assert.equal(body.includes(secret), false, pathname);
+  }
+  const exported = await fetch(`${app.origin}/__admin/providers/export?id=legacy-inline`).then((response) => response.json());
+  assert.equal(Object.hasOwn(exported.provider, 'api_key'), false);
+  assert.equal(Object.hasOwn(exported.provider, 'token'), false);
+  assert.equal(app.output().includes(secret), false);
+});
+
+test('provider create and update reject client-supplied inline tokens without reflecting them', async (t) => {
+  const createSecret = 'fixture-client-create-inline-token';
+  const updateSecret = 'fixture-client-update-inline-token';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'saved-custom',
+      tokenEnv: 'SAVED_CUSTOM_KEY',
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+    childEnv: { SAVED_CUSTOM_KEY: 'fixture-saved-custom-key' },
+  });
+
+  const created = await postJson(app.origin, '/__admin/providers', {
+    id: 'client-inline',
+    name: 'Client inline',
+    provider_type: 'custom',
+    provider_options: { base_url: 'https://gateway.example/v1' },
+    base_url: 'https://gateway.example/v1',
+    auth: 'bearer',
+    token_env: 'CLIENT_INLINE_KEY',
+    token: createSecret,
+    api_key: 'fixture-separate-api-key',
+    models: ['fixture-model'],
+  });
+  const createdBody = await created.text();
+  assert.equal(created.status, 400);
+  assert.equal(createdBody.includes(createSecret), false);
+
+  const updated = await postJson(app.origin, '/__admin/providers/update', {
+    origId: 'saved-custom',
+    provider: {
+      id: 'saved-custom',
+      name: 'Saved custom',
+      provider_type: 'custom',
+      provider_options: { base_url: app.upstreamOrigin + '/v1' },
+      base_url: app.upstreamOrigin + '/v1',
+      auth: 'bearer',
+      token_env: 'SAVED_CUSTOM_KEY',
+      token: updateSecret,
+      models: ['fixture-model'],
+      enabled: false,
+    },
+  });
+  const updatedBody = await updated.text();
+  assert.equal(updated.status, 400);
+  assert.equal(updatedBody.includes(updateSecret), false);
+
+  const configText = fs.readFileSync(app.configPath, 'utf8');
+  assert.equal(configText.includes(createSecret), false);
+  assert.equal(configText.includes(updateSecret), false);
+  assert.equal(app.output().includes(createSecret), false);
+  assert.equal(app.output().includes(updateSecret), false);
+});
+
+test('touching a legacy inline credential migrates it transactionally to the mode-0600 env file', async (t) => {
+  const secret = "fixture'legacy-migration-key";
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'legacy-inline',
+      token: secret,
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+  });
+  const response = await postJson(app.origin, '/__admin/providers/update', {
+    origId: 'legacy-inline',
+    provider: {
+      id: 'legacy-inline',
+      name: 'Legacy migrated',
+      provider_type: 'custom',
+      provider_options: { base_url: app.upstreamOrigin + '/v1' },
+      base_url: app.upstreamOrigin + '/v1',
+      auth: 'bearer',
+      models: ['fixture-model'],
+      enabled: false,
+    },
+  });
+  assert.equal(response.status, 200);
+  const responseBody = await response.text();
+  assert.equal(responseBody.includes(secret), false);
+
+  const configText = fs.readFileSync(app.configPath, 'utf8');
+  assert.equal(configText.includes(secret), false);
+  assert.equal(/\btoken\s*=/.test(configText), false);
+  const listed = await fetch(`${app.origin}/__admin/providers`).then((result) => result.json());
+  const migrated = listed.providers.find((provider) => provider.id === 'legacy-inline');
+  assert.match(migrated.token_env, /^[A-Za-z_][A-Za-z0-9_]*$/);
+
+  const envFile = path.join(app.home, '.codex-switch', 'env');
+  assert.equal(fs.statSync(envFile).mode & 0o777, 0o600);
+  const historyDir = path.join(app.home, '.codex-switch', 'history');
+  const historyTexts = fs.existsSync(historyDir)
+    ? fs.readdirSync(historyDir).map((name) => fs.readFileSync(path.join(historyDir, name), 'utf8'))
+    : [];
+  assert.equal(historyTexts.some((text) => text.includes(secret)), false);
+  const sourced = spawnSync('/bin/sh', [
+    '-c',
+    '. "$1"; eval "actual=\\${$2}"; [ "$actual" = "$3" ]',
+    'sh',
+    envFile,
+    migrated.token_env,
+    secret,
+  ], {
+    env: process.env,
+    encoding: 'utf8',
+  });
+  assert.equal(sourced.status, 0);
+  assert.equal(app.output().includes(secret), false);
+});
+
+test('env persistence rejects CR, LF, and NUL without writing or reflecting the submitted value', async (t) => {
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'env-validation',
+      tokenEnv: 'ENV_VALIDATION_KEY',
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+  });
+  for (const value of ['fixture-cr\rvalue', 'fixture-lf\nvalue', 'fixture-nul\0value']) {
+    const response = await postJson(app.origin, '/__admin/env-keys/save', {
+      name: 'ENV_VALIDATION_KEY',
+      value,
+    });
+    const body = await response.text();
+    assert.equal(response.status, 400);
+    assert.equal(body.includes(value), false);
+    assert.equal(app.output().includes(value), false);
+  }
+  assert.equal(fs.existsSync(path.join(app.home, '.codex-switch', 'env')), false);
+});
+
+test('runtime routing canonicalizes preset origins before applying bearer or inbound authorization', async (t) => {
+  const captureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-fetch-capture-'));
+  t.after(() => fs.rmSync(captureRoot, { recursive: true, force: true }));
+  const hook = path.join(captureRoot, 'capture-fetch.mjs');
+  const capture = path.join(captureRoot, 'calls.jsonl');
+  fs.writeFileSync(hook, `
+import fs from 'node:fs';
+globalThis.fetch = async function fixtureFetch(url, init = {}) {
+  const authorization = init.headers && init.headers.authorization || '';
+  fs.appendFileSync(process.env.FETCH_CAPTURE_FILE, JSON.stringify({
+    url: String(url),
+    trustedBearer: authorization === 'Bearer ' + process.env.XAI_RUNTIME_KEY,
+    trustedInbound: authorization === process.env.INBOUND_AUTHORIZATION,
+  }) + '\\n');
+  return new Response(JSON.stringify({ data: [{ id: 'fixture-model' }] }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+};
+`);
+  const app = await startCodexSwitchFixture(t, {
+    providers: [
+      {
+        id: 'xai-runtime',
+        providerType: 'xai',
+        providerOptions: {},
+        tokenEnv: 'XAI_RUNTIME_KEY',
+        enabled: true,
+        models: ['xai-runtime-model'],
+      },
+      {
+        id: 'chatgpt-runtime',
+        providerType: 'chatgpt-sub',
+        providerOptions: {},
+        auth: 'chatgpt_subscription',
+        enabled: true,
+        models: ['chatgpt-runtime-model'],
+      },
+    ],
+    childEnv: {
+      NODE_OPTIONS: `--import=${hook}`,
+      FETCH_CAPTURE_FILE: capture,
+      XAI_RUNTIME_KEY: 'fixture-xai-runtime-key',
+      INBOUND_AUTHORIZATION: 'Bearer fixture-inbound-authorization',
+    },
+  });
+
+  assert.equal((await proxyJson(app.origin, 'xai-runtime-model')).status, 200);
+  assert.equal((await proxyJson(app.origin, 'chatgpt-runtime-model', 'Bearer fixture-inbound-authorization')).status, 200);
+  const calls = fs.readFileSync(capture, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+  const xaiCall = calls.find((call) => call.url.endsWith('/responses') && call.trustedBearer);
+  const subscriptionCall = calls.find((call) => call.url.endsWith('/responses') && call.trustedInbound);
+  assert.equal(xaiCall?.url, 'https://api.x.ai/v1/responses');
+  assert.equal(subscriptionCall?.url, 'https://chatgpt.com/backend-api/codex/responses');
+  assert.equal(calls.every((call) => !call.url.startsWith(app.upstreamOrigin)), true);
+  assert.equal(app.upstreamRequests.length, 0);
+  assert.equal(app.output().includes('fixture-xai-runtime-key'), false);
+  assert.equal(app.output().includes('fixture-inbound-authorization'), false);
 });
 
 test('editing reuses only the saved provider token_env and exposes a safe cache summary', async (t) => {
@@ -466,7 +703,7 @@ test('CRUD, raw config, and history reject non-canonical token_env names', async
     }],
     childEnv: { REVIEW_KEY: 'fixture-canonical-env-secret' },
   });
-  const current = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const current = fs.readFileSync(app.configPath, 'utf8');
 
   const edited = await postJson(app.origin, '/__admin/providers/update', {
     origId: 'canonical-env',
@@ -497,7 +734,7 @@ test('CRUD, raw config, and history reject non-canonical token_env names', async
   assert.equal(restored.status, 400);
   assert.match((await restored.json()).error, /token_env|环境变量名/);
 
-  const after = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const after = fs.readFileSync(app.configPath, 'utf8');
   assert.equal(after, current);
   assert.equal(app.upstreamRequests.some((request) => request.authorization === 'Bearer undefined'), false);
   assert.equal(app.output().includes('fixture-canonical-env-secret'), false);
@@ -508,7 +745,7 @@ test('raw config cannot add a bearer provider by borrowing an existing process e
   const app = await startCodexSwitchFixture(t, {
     childEnv: { RAW_BORROWED_KEY: borrowedKey },
   });
-  const current = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const current = fs.readFileSync(app.configPath, 'utf8');
   const attempted = `${current.trimEnd()}\n\n${providerBlock({
     id: 'raw-borrowed',
     baseUrl: `${app.upstreamOrigin}/borrowed-v1`,
@@ -545,7 +782,7 @@ test('raw config cannot change a bearer connection or rebind its credential refe
     },
   });
   await waitForProviderCache(app.origin, 'raw-existing');
-  const current = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const current = fs.readFileSync(app.configPath, 'utf8');
 
   const changedConnection = current.replaceAll(`${app.upstreamOrigin}/v1`, `${app.upstreamOrigin}/changed-v1`);
   const connectionResponse = await postRawConfig(app.origin, changedConnection);
@@ -628,7 +865,7 @@ test('raw provider mutation revokes an older p2 discovery before a blocking p1 r
   });
   await waitUntil(() => Boolean(staleP2), 'old p2 discovery did not start');
 
-  const original = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const original = fs.readFileSync(app.configPath, 'utf8');
   const renamed = original.replace('name = "raw-race-p2"', 'name = "raw-race-p2 changed"');
   const configured = await postRawConfig(app.origin, renamed);
   assert.equal(configured.status, 200);
@@ -733,7 +970,7 @@ test('history restore rejects a bearer connection change that has no same-reques
     childEnv: { HISTORY_SAVED_KEY: savedKey },
   });
   await waitForProviderCache(app.origin, 'history-credential');
-  const current = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const current = fs.readFileSync(app.configPath, 'utf8');
   const unsafeSnapshot = current.replaceAll(`${app.upstreamOrigin}/v1`, `${app.upstreamOrigin}/history-v1`);
   const historyDir = path.join(app.home, '.codex-switch', 'history');
   const historyFile = 'config.20260825010101.001.toml';
@@ -807,7 +1044,7 @@ test('history restore revokes an older p2 discovery before a blocking p1 refresh
 
   await waitForProviderCache(app.origin, 'history-race-p1');
   await waitForProviderCache(app.origin, 'history-race-p2');
-  const current = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const current = fs.readFileSync(app.configPath, 'utf8');
   const historical = current.replace('name = "history-race-p2 current"', 'name = "history-race-p2 historical"');
   const historyDir = path.join(app.home, '.codex-switch', 'history');
   const historyFile = 'config.20260825020202.001.toml';
@@ -1018,7 +1255,8 @@ test('failed provider and key rotation restores config, env, process key, and ca
   const after = await fetch(`${app.origin}/__admin/codex-config`).then((res) => res.json());
   assert.equal(JSON.parse(after.catalog_json).models.find((model) => model.slug === 'fixture-model').context_window, 111111);
   const exported = await fetch(`${app.origin}/__admin/providers/export?id=rollback-existing`).then((res) => res.json());
-  assert.equal(exported.provider.api_key, oldKey);
+  assert.equal(Object.hasOwn(exported.provider, 'api_key'), false);
+  assert.equal(JSON.stringify(exported).includes(oldKey), false);
   const rediscovered = await postJson(app.origin, '/__admin/provider-discover', {
     provider_id: 'rollback-existing',
     provider_type: 'custom',

@@ -4,7 +4,7 @@
   "description": "Thin model-id-routing proxy for Codex: one Codex provider -> N upstream providers, zero body rewriting.",
   "type": "module",
   "engines": {
-    "node": ">=22.15.0"
+    "node": ">=22.15.0 <23 || >=23.8.0"
   },
   "scripts": {
     "test": "node --test",

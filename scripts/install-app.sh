@@ -13,6 +13,8 @@
 # 幂等:重复执行 = 覆盖升级到目标版本。安装前会停掉正在运行的旧实例。
 set -e
 umask 077
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd -P) \
+  || { printf '[install] 无法定位安全安装器目录。\n' >&2; exit 1; }
 
 APP_NAME="Codex Switch"
 DEST_OVERRIDE_SET=false
@@ -98,15 +100,10 @@ validate_install_destination
 DEST="$physical_parent/$APP_NAME.app"
 
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/codex-switch.XXXXXX" 2>/dev/null) || die "无法创建安全的临时目录。"
-INSTALL_STAGE=
+MOUNT=
 cleanup_installer() {
+  if [ -n "$MOUNT" ]; then hdiutil detach "$MOUNT" >/dev/null 2>&1 || true; fi
   /bin/rm -rf "$WORK_DIR"
-  if [ -n "$INSTALL_STAGE" ]; then
-    case "$INSTALL_STAGE" in
-      "$physical_parent"/.codex-switch-stage.*) /bin/rm -rf "$INSTALL_STAGE" ;;
-      *) say "跳过清理异常 staging 路径: $INSTALL_STAGE" ;;
-    esac
-  fi
 }
 trap cleanup_installer EXIT INT TERM
 
@@ -547,7 +544,7 @@ if [ "$AUTO_RELEASE" = true ]; then
 fi
 
 # ---------- 3. 停掉旧实例(升级场景) ----------
-if [ -f "$HOME/.codex-switch/run.pid" ]; then
+if [ "${CODEX_SWITCH_INSTALL_NO_APP_CONTROL:-0}" != 1 ] && [ -f "$HOME/.codex-switch/run.pid" ]; then
   OLD_PID=$(cat "$HOME/.codex-switch/run.pid" 2>/dev/null || true)
   if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
     say "停止运行中的旧实例 (pid $OLD_PID)…"
@@ -572,71 +569,21 @@ INSTALL_NODE="$SRC_APP/Contents/MacOS/node"
 
 say "安装到 $DEST…"
 validate_install_destination
-INSTALL_STAGE=$(mktemp -d "$physical_parent/.codex-switch-stage.XXXXXX" 2>/dev/null) \
-  || die "无法在 Applications 目录创建安全 staging。"
-STAGED_APP="$INSTALL_STAGE/$APP_NAME.app"
-/bin/cp -R "$SRC_APP" "$STAGED_APP"
-[ -d "$STAGED_APP" ] && [ ! -L "$STAGED_APP" ] \
-  || die "staging 中的应用不完整，已停止安装。"
-
+INSTALL_HELPER="$SCRIPT_DIR/install-app-bundle.cjs"
+[ -f "$INSTALL_HELPER" ] || die "缺少共享安全换包实现，拒绝安装。"
 # Node ships inside the signed app, so the installer does not depend on a
-# system scripting runtime. fs.renameSync maps to rename(2): the final path is
-# replaced without following a symlink swapped in after validation. The backup
-# and staging names are generated under the validated physical parent only.
-"$INSTALL_NODE" - "$STAGED_APP" "$DEST" "$physical_parent" <<'NODE_INSTALL'
-const fs = require('node:fs');
-const path = require('node:path');
-
-const [stagedApp, destination, physicalParent] = process.argv.slice(2);
-const appName = 'Codex Switch.app';
-const stageRoot = path.dirname(stagedApp);
-const expectedDestination = path.join(physicalParent, appName);
-if (destination !== expectedDestination
-    || path.dirname(stageRoot) !== physicalParent
-    || !path.basename(stageRoot).startsWith('.codex-switch-stage.')) {
-  throw new Error('refusing paths outside the validated Applications parent');
-}
-if (fs.realpathSync(physicalParent) !== physicalParent) {
-  throw new Error('validated Applications parent identity changed');
-}
-const stagedStat = fs.lstatSync(stagedApp);
-if (!stagedStat.isDirectory() || stagedStat.isSymbolicLink()) {
-  throw new Error('staged app must be a real directory');
-}
-
-const backup = fs.mkdtempSync(path.join(physicalParent, '.codex-switch-backup.'));
-fs.rmdirSync(backup);
-let movedPrevious = false;
-try {
-  try {
-    fs.lstatSync(destination);
-    fs.renameSync(destination, backup);
-    movedPrevious = true;
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-  fs.renameSync(stagedApp, destination);
-} catch (error) {
-  if (movedPrevious) {
-    try {
-      fs.lstatSync(destination);
-    } catch (destinationError) {
-      if (destinationError.code === 'ENOENT') {
-        try { fs.renameSync(backup, destination); } catch { /* Preserve backup for manual recovery. */ }
-      }
-    }
-  }
-  throw error;
-}
-if (movedPrevious) fs.rmSync(backup, { recursive: true, force: false });
-NODE_INSTALL
-/bin/rmdir "$INSTALL_STAGE"
-INSTALL_STAGE=
+# system scripting runtime. All entry points share this staging/rename/rollback
+# implementation; there is no second admin-only DMG replacement path.
+"$INSTALL_NODE" "$INSTALL_HELPER" "$SRC_APP" "$DEST" "$physical_parent" \
+  || die "应用原子替换失败；旧版本已回滚或保留在安全 backup。"
 hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+MOUNT=
 
 # ---------- 5. 收尾:防御性清理隔离属性 + 放行 ----------
 xattr -cr "$DEST" 2>/dev/null || true
 say "完成:$DEST"
-say "启动…"
-open "$DEST" 2>/dev/null || say "已安装;请手动打开 $APP_NAME。"
+if [ "${CODEX_SWITCH_INSTALL_NO_APP_CONTROL:-0}" != 1 ]; then
+  say "启动…"
+  open "$DEST" 2>/dev/null || say "已安装;请手动打开 $APP_NAME。"
+fi
 say "配置页稍后可用: http://127.0.0.1:8787/"

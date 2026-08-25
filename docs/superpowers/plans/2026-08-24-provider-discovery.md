@@ -6,7 +6,7 @@
 
 **Architecture:** Keep byte-preserving Responses routing unchanged. Add a backend-owned provider registry and isolated discovery adapters, persist provider type/options alongside the existing derived URL, and move the management page into its own renderer module. Unsupported Chat-Completions-only vendors remain searchable informational entries and cannot create broken routes.
 
-**Tech Stack:** Node.js 22.15.0+ ESM, built-in `fetch` and `node:test`, `@iarna/toml`, server-rendered HTML/CSS/vanilla JavaScript, macOS Swift/AppKit packaging scripts.
+**Tech Stack:** Node.js `>=22.15.0 <23 || >=23.8.0` ESM, built-in `fetch` and `node:test`, `@iarna/toml`, server-rendered HTML/CSS/vanilla JavaScript, macOS Swift/AppKit packaging scripts.
 
 **Spec:** `docs/superpowers/specs/2026-08-24-provider-discovery-design.md`
 

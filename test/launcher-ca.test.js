@@ -246,6 +246,7 @@ function runInstallVersionGate(t, version) {
   const bin = path.join(root, 'bin');
   const project = path.join(root, 'project');
   const npmMarker = path.join(root, 'npm-called');
+  const probeMarker = path.join(root, 'system-ca-probed');
   fs.mkdirSync(bin);
   fs.mkdirSync(project);
   fs.copyFileSync(path.join(REPO_ROOT, 'install.sh'), path.join(project, 'install.sh'));
@@ -255,6 +256,17 @@ case "$1" in
   -e) printf '%s\\n' "\${NODE_FIXTURE_VERSION%%.*}" ;;
   -p) printf '%s\\n' "$NODE_FIXTURE_VERSION" ;;
   -v) printf 'v%s\\n' "$NODE_FIXTURE_VERSION" ;;
+  --use-system-ca)
+    printf probed > "$PROBE_MARKER"
+    major=\${NODE_FIXTURE_VERSION%%.*}
+    remainder=\${NODE_FIXTURE_VERSION#*.}
+    minor=\${remainder%%.*}
+    if { [ "$major" -eq 22 ] && [ "$minor" -ge 15 ]; } \
+      || { [ "$major" -ge 23 ] && { [ "$major" -gt 23 ] || [ "$minor" -ge 8 ]; }; }; then
+      exit 0
+    fi
+    exit 9
+    ;;
   *) exit 0 ;;
 esac
 `);
@@ -266,21 +278,45 @@ esac
       PATH: `${bin}:/usr/bin:/bin`,
       NODE_FIXTURE_VERSION: version,
       NPM_MARKER: npmMarker,
+      PROBE_MARKER: probeMarker,
     },
     encoding: 'utf8',
   });
-  return { ...result, npmMarker };
+  return { ...result, npmMarker, probeMarker };
 }
 
 test('source installer rejects Node 22.14 before dependency installation', (t) => {
   const result = runInstallVersionGate(t, '22.14.9');
   assert.equal(result.status, 1, result.stdout + result.stderr);
-  assert.match(result.stdout + result.stderr, /22\.15\.0/);
+  assert.match(result.stdout + result.stderr, /22\.15\.0|23\.8\.0/);
   assert.equal(fs.existsSync(result.npmMarker), false);
+  assert.equal(fs.existsSync(result.probeMarker), true);
 });
 
 test('source installer admits Node 22.15 through the version gate', (t) => {
   const result = runInstallVersionGate(t, '22.15.0');
   assert.equal(result.status, 73, result.stdout + result.stderr);
   assert.equal(fs.existsSync(result.npmMarker), true);
+  assert.equal(fs.existsSync(result.probeMarker), true);
+});
+
+test('source installer rejects Node 23.7 when the runtime lacks --use-system-ca', (t) => {
+  const result = runInstallVersionGate(t, '23.7.0');
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.equal(fs.existsSync(result.npmMarker), false);
+  assert.equal(fs.existsSync(result.probeMarker), true);
+});
+
+test('source installer admits Node 23.8 when the runtime accepts --use-system-ca', (t) => {
+  const result = runInstallVersionGate(t, '23.8.0');
+  assert.equal(result.status, 73, result.stdout + result.stderr);
+  assert.equal(fs.existsSync(result.npmMarker), true);
+  assert.equal(fs.existsSync(result.probeMarker), true);
+});
+
+test('package engines express the non-monotonic Node system-CA support range', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+  const lockfile = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package-lock.json'), 'utf8'));
+  assert.equal(packageJson.engines.node, '>=22.15.0 <23 || >=23.8.0');
+  assert.equal(lockfile.packages[''].engines.node, '>=22.15.0 <23 || >=23.8.0');
 });

@@ -16,6 +16,16 @@ test('Custom is last and unsupported vendors remain searchable', () => {
   assert.equal(presets.find((item) => item.id === 'deepseek').name, 'DeepSeek（深度求索）');
 });
 
+test('ChatGPT subscription is a dedicated fixed-auth preset', () => {
+  const preset = getProviderPreset('chatgpt-sub');
+  assert.ok(preset);
+  assert.equal(preset.auth, 'chatgpt_subscription');
+  assert.equal(preset.baseUrl, 'https://chatgpt.com/backend-api/codex');
+  assert.equal(preset.routable, true);
+  assert.equal(inferProviderType('https://chatgpt.com/backend-api/codex'), 'chatgpt-sub');
+  assert.equal(resolveProviderConnection('chatgpt-sub', {}, 'https://attacker.example/v1').baseUrl, 'https://chatgpt.com/backend-api/codex');
+});
+
 test('fixed and parameterized URLs resolve deterministically', () => {
   assert.equal(resolveProviderConnection('xai', {}, '').baseUrl, 'https://api.x.ai/v1');
   assert.equal(
@@ -65,8 +75,12 @@ test('only supported, beta, and limited presets are routable', () => {
   assert.equal(isRoutableCompatibility('unsupported'), false);
   assert.equal(isRoutableCompatibility('unverified'), false);
   assert.equal(getProviderPreset('volcengine-ark').compatibility, 'supported');
-  assert.equal(getProviderPreset('nvidia-nim').compatibility, 'limited');
-  assert.equal(getProviderPreset('custom').compatibility, 'limited');
+  assert.equal(getProviderPreset('nvidia-nim').compatibility, 'unverified');
+  assert.equal(getProviderPreset('custom').compatibility, 'unverified');
+  assert.equal(getProviderPreset('nvidia-nim').routable, true);
+  assert.equal(getProviderPreset('custom').routable, true);
+  assert.match(getProviderPreset('nvidia-nim').public.compatibilityNote, /未验证/);
+  assert.match(getProviderPreset('custom').public.compatibilityNote, /未验证/);
 });
 
 test('derived connection fields reject invalid identifiers and normalize Azure URLs', () => {

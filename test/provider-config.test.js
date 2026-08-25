@@ -1,17 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import TOML from '@iarna/toml';
-import {
-  buildProvidersRegion,
-  normalizeProvider,
-  providerConnectionIdentity,
-  replaceProvidersRegion,
-} from '../src/provider-config.js';
+import * as providerConfig from '../src/provider-config.js';
 import {
   cacheDiscoveredModels,
   capsCache,
   resolveCaps,
 } from '../src/caps.js';
+
+const {
+  buildProvidersRegion,
+  normalizeProvider,
+  providerConnectionIdentity,
+  replaceProvidersRegion,
+} = providerConfig;
+const normalizeProviderForLoad = providerConfig.normalizeProviderForLoad || normalizeProvider;
 
 function customProvider(id, baseUrl = `https://${id}.example/v1`) {
   return normalizeProvider({
@@ -62,7 +65,7 @@ test('token_env is canonical at the normalization boundary', () => {
 });
 
 test('connection identity covers authoritative options without credential material', () => {
-  const beijing = normalizeProvider({
+  const beijing = normalizeProviderForLoad({
     id: 'bailian-a',
     provider_type: 'bailian',
     provider_options: { region: 'cn-beijing', workspace_id: '' },
@@ -71,7 +74,7 @@ test('connection identity covers authoritative options without credential materi
     token: 'fixture-inline-secret',
     models: ['qwen-plus'],
   });
-  const singapore = normalizeProvider({
+  const singapore = normalizeProviderForLoad({
     ...beijing,
     provider_options: { region: 'ap-southeast-1', workspace_id: '' },
   });
@@ -81,6 +84,131 @@ test('connection identity covers authoritative options without credential materi
   assert.equal(identity.includes('SECRET_ENV_NAME'), false);
   assert.equal(identity.includes('fixture-inline-secret'), false);
   assert.equal(identity.includes('qwen-plus'), false);
+});
+
+test('new provider auth and origin are bound to the selected registry preset', () => {
+  const accepted = [
+    {
+      label: 'fixed bearer preset ignores a submitted URL',
+      input: {
+        id: 'xai-bound', provider_type: 'xai', provider_options: {},
+        base_url: 'https://attacker.example/v1', auth: 'bearer', token_env: 'XAI_BOUND_KEY', models: ['grok'],
+      },
+      auth: 'bearer',
+      baseUrl: 'https://api.x.ai/v1',
+    },
+    {
+      label: 'subscription preset ignores a submitted URL',
+      input: {
+        id: 'chatgpt-bound', provider_type: 'chatgpt-sub', provider_options: {},
+        base_url: 'https://attacker.example/v1', auth: 'chatgpt_subscription', models: ['gpt-fixture'],
+      },
+      auth: 'chatgpt_subscription',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+    },
+  ];
+  for (const entry of accepted) {
+    const normalized = normalizeProvider(entry.input);
+    assert.equal(normalized.auth, entry.auth, entry.label);
+    assert.equal(normalized.base_url, entry.baseUrl, entry.label);
+  }
+
+  const rejected = [
+    ['Custom subscription', 'custom', 'chatgpt_subscription', 'https://gateway.example/v1'],
+    ['Custom OAuth', 'custom', 'chatgpt_oauth', 'https://gateway.example/v1'],
+    ['Custom passthrough', 'custom', 'passthrough', 'https://gateway.example/v1'],
+    ['NIM OAuth', 'nvidia-nim', 'chatgpt_oauth', 'http://127.0.0.1:8000/v1'],
+    ['preset passthrough', 'xai', 'passthrough', 'https://api.x.ai/v1'],
+  ];
+  for (const [label, providerType, auth, baseUrl] of rejected) {
+    assert.throws(() => normalizeProvider({
+      id: `rejected-${providerType}-${auth}`,
+      provider_type: providerType,
+      provider_options: { base_url: baseUrl },
+      base_url: baseUrl,
+      auth,
+      token_env: 'REJECTED_AUTH_KEY',
+      models: ['fixture-model'],
+    }), /auth|认证/i, label);
+  }
+});
+
+test('legacy load keeps bearer endpoints but limits OAuth and passthrough to trusted destinations', () => {
+  const legacyBearerCases = [
+    ['kimi', 'https://api.moonshot.cn/v1'],
+    ['glm', 'https://open.bigmodel.cn/api/paas/v4'],
+    ['deepseek', 'https://api.deepseek.com/v1'],
+  ];
+  for (const [id, baseUrl] of legacyBearerCases) {
+    const provider = normalizeProviderForLoad({
+      id, base_url: baseUrl, auth: 'bearer', token_env: `${id.toUpperCase()}_KEY`, models: [`${id}-model`],
+    });
+    assert.equal(provider.provider_type, 'custom', id);
+    assert.equal(provider.base_url, baseUrl, id);
+    assert.equal(provider.auth, 'bearer', id);
+  }
+
+  for (const auth of ['chatgpt_subscription', 'chatgpt_oauth']) {
+    const provider = normalizeProviderForLoad({
+      id: `legacy-${auth}`,
+      base_url: 'https://chatgpt.com/backend-api/codex',
+      auth,
+      models: ['gpt-fixture'],
+    });
+    assert.equal(provider.provider_type, 'chatgpt-sub');
+    assert.equal(provider.auth, auth);
+    assert.throws(() => normalizeProviderForLoad({
+      id: `unsafe-${auth}`,
+      base_url: 'https://attacker.example/v1',
+      auth,
+      models: ['fixture-model'],
+    }), /ChatGPT|auth|认证|origin/i);
+  }
+
+  for (const baseUrl of ['http://127.0.0.1:9000/v1', 'https://api.x.ai/v1']) {
+    const provider = normalizeProviderForLoad({
+      id: 'safe-legacy-passthrough', base_url: baseUrl, auth: 'passthrough', models: ['fixture-model'],
+    });
+    assert.equal(provider.base_url, baseUrl);
+    assert.equal(provider.auth, 'passthrough');
+  }
+  assert.throws(() => normalizeProviderForLoad({
+    id: 'unsafe-legacy-passthrough',
+    base_url: 'https://attacker.example/v1',
+    auth: 'passthrough',
+    models: ['fixture-model'],
+  }), /passthrough|trusted|可信/i);
+});
+
+test('new Custom mutations reject unsupported official endpoints and client inline tokens', () => {
+  const disguised = {
+    id: 'disguised-deepseek',
+    provider_type: 'custom',
+    provider_options: { base_url: 'https://api.deepseek.com/v1' },
+    base_url: 'https://api.deepseek.com/v1',
+    auth: 'bearer',
+    token_env: 'DISGUISED_KEY',
+    models: ['deepseek-chat'],
+  };
+  assert.throws(() => normalizeProvider(disguised), /unsupported|不支持|official/i);
+  assert.throws(() => normalizeProvider({
+    ...disguised,
+    provider_options: { base_url: 'https://gateway.example/v1' },
+    base_url: 'https://gateway.example/v1',
+    token: 'fixture-client-inline-token',
+  }), /inline|token|凭证/i);
+
+  const legacy = normalizeProviderForLoad({
+    id: 'legacy-inline',
+    base_url: 'https://gateway.example/v1',
+    auth: 'bearer',
+    token: 'fixture-server-only-inline-token',
+    models: ['fixture-model'],
+  });
+  assert.equal(Boolean(legacy.token), true);
+  const serialized = buildProvidersRegion([legacy]);
+  assert.equal(serialized.includes('fixture-server-only-inline-token'), false);
+  assert.equal(/\btoken\s*=/.test(serialized), false);
 });
 
 test('unsupported presets cannot be normalized into routes', () => {
@@ -95,7 +223,7 @@ test('unsupported presets cannot be normalized into routes', () => {
 });
 
 test('legacy providers remain custom and keep their URL', () => {
-  const provider = normalizeProvider({
+  const provider = normalizeProviderForLoad({
     id: 'legacy',
     name: 'Legacy',
     auth: 'bearer',
@@ -109,7 +237,7 @@ test('legacy providers remain custom and keep their URL', () => {
 });
 
 test('legacy parameterized preset URLs keep their inferred connection options', () => {
-  const bailian = normalizeProvider({
+  const bailian = normalizeProviderForLoad({
     id: 'legacy-bailian',
     name: 'Legacy Bailian',
     auth: 'bearer',
@@ -121,7 +249,7 @@ test('legacy parameterized preset URLs keep their inferred connection options', 
   assert.deepEqual(bailian.provider_options, { region: 'ap-southeast-1', workspace_id: '' });
   assert.equal(bailian.base_url, 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1');
 
-  const bedrock = normalizeProvider({
+  const bedrock = normalizeProviderForLoad({
     id: 'legacy-bedrock',
     name: 'Legacy Bedrock',
     auth: 'bearer',
@@ -137,7 +265,7 @@ test('legacy parameterized preset URLs keep their inferred connection options', 
 test('legacy Bailian workspace URLs normalize all supported regions', () => {
   for (const region of ['cn-beijing', 'ap-southeast-1', 'us-east-1']) {
     const baseUrl = `https://workspace123.${region}.maas.aliyuncs.com/compatible-mode/v1`;
-    const provider = normalizeProvider({
+    const provider = normalizeProviderForLoad({
       id: `legacy-bailian-workspace-${region}`,
       name: 'Legacy Bailian Workspace',
       auth: 'bearer',
