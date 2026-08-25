@@ -1,15 +1,6 @@
 #!/bin/sh
-# codex-switch launcher.
-#
-# In corporate networks with transparent HTTPS interception (self-signed /
-# enterprise CA in the macOS keychain), Node's bundled CA list plus any
-# pre-existing NODE_EXTRA_CA_CERTS file may still miss the intercepting CA,
-# and fetch() fails with UNABLE_TO_GET_ISSUER_CERT_LOCALLY (curl works).
-#
-# On macOS this script builds one combined bundle: the content of a
-# pre-existing NODE_EXTRA_CA_CERTS file (if any) + all system and login
-# keychain certificates, and points NODE_EXTRA_CA_CERTS at it. Nothing is
-# removed; pre-existing certs are folded in.
+# codex-switch launcher. Node loads its bundled roots, the macOS system store,
+# and any caller-provided NODE_EXTRA_CA_CERTS itself.
 
 cd "$(dirname "$0")/.." || exit 1
 
@@ -24,11 +15,4 @@ if [ -f "$ENV_FILE" ]; then
   echo "[codex-switch] loaded local env: $ENV_FILE"
 fi
 
-# Apply this after the local env so an env-file NODE_EXTRA_CA_CERTS value is
-# preserved in the combined bundle too.
-. ./scripts/prepare-ca.sh
-if [ "${NODE_EXTRA_CA_CERTS:-}" = "$DIR/extra-ca.pem" ]; then
-  echo "[codex-switch] extra CA bundle -> $NODE_EXTRA_CA_CERTS (env value + macOS keychains)"
-fi
-
-exec node src/server.js "$@"
+exec node --use-system-ca src/server.js "$@"

@@ -24,7 +24,6 @@ let nodeBin = bundlePath + "/Contents/MacOS/node"
 let appDir = bundlePath + "/Contents/Resources/app"
 let serverJs = appDir + "/src/server.js"
 let cfgPath = appDir + "/config.toml"
-let prepareCA = appDir + "/scripts/prepare-ca.sh"
 let launchServer = appDir + "/scripts/launch-server.sh"
 
 // 从 config.toml 读端口(listen = "127.0.0.1:8787"),读不到回退 8787
@@ -95,7 +94,7 @@ func startServer() {
   sh.executableURL = URL(fileURLWithPath: "/bin/sh")
   // 固定脚本通过 argv 接收路径,不把任何文件系统路径拼进 shell 源码。
   // launch-server.sh 最终 exec node,所以子进程 pid 即 node pid,可直接 terminate。
-  sh.arguments = [launchServer, envFile, prepareCA, nodeBin, serverJs]
+  sh.arguments = [launchServer, envFile, nodeBin, serverJs]
   sh.standardOutput = logHandle
   sh.standardError = logHandle
   do { try sh.run() } catch { return }

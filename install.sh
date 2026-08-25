@@ -4,14 +4,22 @@
 set -e
 cd "$(dirname "$0")"
 
-# ---- 环境检查:Node >= 20 ----
+# ---- 环境检查:Node >= 22.15.0(--use-system-ca 从 22.15.0 起可用) ----
 if ! command -v node >/dev/null 2>&1; then
-  echo "[codex-switch] 需要 Node.js >= 20,请先安装: https://nodejs.org"
+  echo "[codex-switch] 需要 Node.js >= 22.15.0,请先安装: https://nodejs.org"
   exit 1
 fi
-NODE_MAJOR=$(node -e 'console.log(process.versions.node.split(".")[0])')
-if [ "$NODE_MAJOR" -lt 20 ]; then
-  echo "[codex-switch] Node.js >= 20 才能运行(当前 $(node -v))"
+NODE_VERSION=$(node -p 'process.versions.node')
+NODE_MAJOR=${NODE_VERSION%%.*}
+NODE_REMAINDER=${NODE_VERSION#*.}
+NODE_MINOR=${NODE_REMAINDER%%.*}
+case "$NODE_MAJOR" in ''|*[!0-9]*) NODE_VERSION_OK=0 ;; *) NODE_VERSION_OK=1 ;; esac
+case "$NODE_MINOR" in ''|*[!0-9]*) NODE_VERSION_OK=0 ;; esac
+if [ "$NODE_VERSION_OK" -eq 1 ] && { [ "$NODE_MAJOR" -lt 22 ] || { [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 15 ]; }; }; then
+  NODE_VERSION_OK=0
+fi
+if [ "$NODE_VERSION_OK" -ne 1 ]; then
+  echo "[codex-switch] Node.js >= 22.15.0 才能运行(当前 $(node -v))"
   exit 1
 fi
 

@@ -97,11 +97,11 @@ xattr -cr "/Applications/Codex Switch.app"
 
 App 默认用 macOS LaunchAgent 在登录时启动，菜单栏可查看状态、打开配置页、检查更新或退出。退出 App 会剥离 codex-switch 注入的 Codex 配置，保留 Codex 自己的其他设置。
 
-源码启动和打包 App 启动都会为 child Node 合并已有 `NODE_EXTRA_CA_CERTS` 与 macOS system/login keychain 证书，供企业 HTTPS 代理环境使用；已有 CA 文件不会被改写。证书内容不会写入 `run.log`，日志只会记录最终 bundle 路径。
+源码启动和打包 App 都显式使用 Node 的 `--use-system-ca`：Node 同时信任内置根证书、macOS 系统证书库，以及调用方已有的 `NODE_EXTRA_CA_CERTS`。启动器不会改写该环境变量，也不会生成本地 CA bundle 或临时证书文件。
 
 ### 源码安装
 
-需要 Node.js 20+：
+需要 Node.js 22.15.0+（该版本起支持 `--use-system-ca`）：
 
 ```sh
 git clone https://github.com/cnwenf/codex-switch.git

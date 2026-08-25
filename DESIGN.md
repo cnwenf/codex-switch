@@ -215,7 +215,7 @@ adapter table 隔离异构 API：
 - 初始 URL、redirect、pagination link、cursor/path/query/fragment 都检查原始及最多三层 percent decoding，畸形或过深编码 fail closed。
 - 单请求超时 10 秒；JSON response 最多 4 MiB；最多 5 页、2,000 个模型。越界时立即取消 reader 并返回稳定错误。
 - 上游错误正文和内部 stack 不返回浏览器；HTTP 状态映射成固定 validation state/message。
-- 源码启动器、打包 Swift launcher 和打包 shell fallback 在启动 child Node 前共用 `scripts/prepare-ca.sh`：保留已有 `NODE_EXTRA_CA_CERTS` 文件内容，合并标准 macOS system/login keychain 证书，再只把 bundle 路径传给 child。该逻辑不依赖交互 shell 已经导出企业 CA，也不把证书正文写入日志；非 macOS 或缺少 `security` 时不猜测 CA。
+- 源码启动器、打包 Swift launcher 和打包 shell fallback 都以 `--use-system-ca` 启动 Node；Node 自行叠加内置根证书、macOS 系统证书库和调用方已有的 `NODE_EXTRA_CA_CERTS`。源码运行要求 Node.js 22.15.0+，打包版固定 Node.js 22.23.2；启动器不生成或发布本地 CA bundle 与 scratch 文件。
 - DMG 安装先把应用复制到已规范化 Applications 父目录内的随机 staging，再用 DMG 内置 Node 的 `rename(2)` 将旧目标移到同目录随机 backup、把 staging 原子改名为最终 `.app`；最终路径若在校验后被换成 symlink，只移动/替换链接本身，不跟随到链接目标。清理只作用于安装器自己在该父目录创建的随机 staging/backup 和下载临时目录。断电或恶意并发导致第二次 rename 失败时安装会 fail closed，并可能保留随机 backup 供手工恢复；这里不宣称跨断电事务。
 
 这些限制降低 SSRF、Bearer 跨域转发、无限分页、内存放大和错误正文泄密风险。它们不把未验证的 Custom endpoint 升级成可信厂商。

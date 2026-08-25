@@ -6,7 +6,7 @@
 
 **Architecture:** Keep byte-preserving Responses routing unchanged. Add a backend-owned provider registry and isolated discovery adapters, persist provider type/options alongside the existing derived URL, and move the management page into its own renderer module. Unsupported Chat-Completions-only vendors remain searchable informational entries and cannot create broken routes.
 
-**Tech Stack:** Node.js 20+ ESM, built-in `fetch` and `node:test`, `@iarna/toml`, server-rendered HTML/CSS/vanilla JavaScript, macOS Swift/AppKit packaging scripts.
+**Tech Stack:** Node.js 22.15.0+ ESM, built-in `fetch` and `node:test`, `@iarna/toml`, server-rendered HTML/CSS/vanilla JavaScript, macOS Swift/AppKit packaging scripts.
 
 **Spec:** `docs/superpowers/specs/2026-08-24-provider-discovery-design.md`
 
@@ -896,3 +896,38 @@ Report:
 - browser and DMG evidence;
 - providers live-tested versus stub/docs-tested;
 - any remaining vendor limitations, especially unsupported direct Responses APIs.
+
+### Task 11: ChatGPT Subscription Long-Running 502 and Native macOS CA Handling
+
+**Files:**
+- Modify: `src/server.js`
+- Modify: `scripts/start.sh`
+- Modify: `scripts/launch-server.sh`
+- Modify: `scripts/build-macos-app.sh`
+- Modify: `assets/launcher/CodexSwitchLauncher.swift`
+- Replace: `test/launcher-ca.test.js`
+- Delete: `scripts/prepare-ca.sh`
+
+**Interfaces:**
+- Consumes: downstream request/response lifecycle, Node.js 22.23.2 `--use-system-ca`, optional inherited `NODE_EXTRA_CA_CERTS`, and source/packaged launchers.
+- Produces: bounded upstream Responses streams that are aborted when the client disconnects, plus packaged/source launches that trust the macOS system store without generating a local PEM bundle.
+
+- [ ] **Step 1: Preserve the abandoned-stream regression evidence**
+
+Keep focused tests proving that disconnecting downstream clients aborts upstream fetches before headers and during SSE, releases sockets/file descriptors, preserves normal SSE bytes, performs no POST retry, and emits only allowlisted diagnostic cause codes.
+
+- [ ] **Step 2: Write failing launcher behavior tests**
+
+Test behavior rather than source-text presence: source and packaged launchers must start Node with `--use-system-ca`; an existing `NODE_EXTRA_CA_CERTS` must remain inherited unchanged; filesystem paths containing spaces and shell metacharacters must remain positional argv; no launcher may create or publish `~/.codex-switch/extra-ca.pem` or CA scratch files.
+
+- [ ] **Step 3: Remove the custom CA-bundle architecture**
+
+Delete `scripts/prepare-ca.sh` and stop packaging or sourcing it. Launch Node with the explicit `--use-system-ca` flag from `scripts/start.sh`, the packaged shell fallback, and the Swift launcher path through `scripts/launch-server.sh`. Preserve the optional env-file load and any caller-provided `NODE_EXTRA_CA_CERTS`; Node combines bundled, system, and extra stores itself.
+
+- [ ] **Step 4: Verify the fix**
+
+Run focused launcher and proxy-cancellation tests, the full suite, shell/JavaScript/Swift/YAML/diff/security checks, a repeated high-cancellation soak, and a packaged-launcher argv smoke test. On macOS, compare bundled-only versus `--use-system-ca` unauthenticated HTTPS behavior without reading or sending any API key.
+
+- [ ] **Step 5: Commit and independently review**
+
+Commit the architecture change with a scoped `fix:` message. Review both the stream-cancellation fix and the CA-launcher replacement before Task 10 release work.
