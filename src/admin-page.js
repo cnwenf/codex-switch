@@ -90,6 +90,15 @@ export function nextOptionIndex(current, length, delta) {
   return (current + delta + length) % length;
 }
 
+export function tabIndexForKey(current, length, key) {
+  if (!length || current < 0 || current >= length) return -1;
+  if (key === 'Home') return 0;
+  if (key === 'End') return length - 1;
+  if (key === 'ArrowRight') return (current + 1) % length;
+  if (key === 'ArrowLeft') return (current - 1 + length) % length;
+  return -1;
+}
+
 export function combineCapability(first, second) {
   if (first === true || second === true) return true;
   if (first === false && second === false) return false;
@@ -155,7 +164,7 @@ export function renderAdminPage({ host, port, version }) {
   --color-surface-muted:oklch(.945 .008 255);
   --color-surface-hover:oklch(.925 .018 255);
   --color-border:oklch(.84 .015 255);
-  --color-border-strong:oklch(.72 .025 255);
+  --color-border-strong:oklch(.62 .025 255);
   --color-text:oklch(.25 .025 255);
   --color-text-secondary:oklch(.43 .025 255);
   --color-text-muted:oklch(.47 .025 255);
@@ -325,8 +334,8 @@ pre{font-family:var(--font-mono);font-size:var(--font-size-metadata);line-height
 .modal-head b{min-width:0;font-size:var(--font-size-section);line-height:var(--line-section);overflow-wrap:anywhere}
 .modal-body{flex:1;min-height:0;overflow:auto;padding:var(--space-4) var(--space-5)}
 .modal-foot{flex:none;display:flex;justify-content:flex-end;gap:var(--space-2);margin:0;padding:var(--space-3) var(--space-5);background:var(--color-surface);border-top:1px solid var(--color-border)}
-.xbtn{width:var(--control-height);min-height:var(--control-height);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;background:transparent;border:1px solid transparent;color:var(--color-text-secondary);font-size:var(--font-size-section);padding:0;border-radius:var(--radius-md)}
-.xbtn:hover{color:var(--color-text);background:var(--color-surface-hover);border-color:var(--color-border)}
+.xbtn{width:var(--control-height);min-height:var(--control-height);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;background:transparent;border:1px solid var(--color-border-strong);color:var(--color-text-secondary);font-size:var(--font-size-section);padding:0;border-radius:var(--radius-md)}
+.xbtn:hover{color:var(--color-text);background:var(--color-surface-hover);border-color:var(--color-accent)}
 .xbtn:focus-visible{outline:3px solid var(--color-accent-soft);outline-offset:2px;border-color:var(--color-accent)}
 .xbtn:active{background:var(--color-border)}
 .xbtn:disabled{cursor:not-allowed;color:var(--color-text-muted);background:var(--color-surface-muted)}
@@ -343,6 +352,7 @@ pre{font-family:var(--font-mono);font-size:var(--font-size-metadata);line-height
 .fhint{font-size:var(--font-size-metadata);line-height:var(--line-metadata);color:var(--color-text-secondary);margin-top:var(--space-1);max-width:var(--prose-width);overflow-wrap:anywhere}
 label.ck{min-height:var(--control-height);display:flex;align-items:center;gap:var(--space-2);font-size:var(--font-size-body);line-height:var(--line-body);cursor:pointer;text-transform:none;color:var(--color-text)}
 label.ck input{width:1rem;height:1rem;min-height:0;flex:none;accent-color:var(--color-accent)}
+.autostart-toggle{display:flex;gap:var(--space-2);align-items:center;cursor:pointer;font-size:var(--font-size-body)}
 .form-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 var(--space-4)}
 .form-span{grid-column:1/-1}
 .combo{position:relative;min-width:0}
@@ -431,12 +441,15 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
   .modal-foot .btn{flex:1}
   .listbox{position:relative;top:auto;left:auto;right:auto;max-height:calc(100dvh - 16rem);margin-top:var(--space-2);box-shadow:none}
   .btn,.tabbtn,.xbtn,.list-option{min-height:var(--control-height-touch)}
+  .xbtn{width:var(--control-height-touch);min-width:var(--control-height-touch)}
   .btn.small{min-height:var(--control-height-touch)}
   .switch{min-width:var(--control-height-touch);min-height:var(--control-height-touch)}
   .switch .slider{top:.5rem;bottom:.5rem}
+  summary{min-height:var(--control-height-touch)}
+  .autostart-toggle{min-height:var(--control-height-touch)}
   label.ck{min-height:var(--control-height-touch)}
   .selected-remove{width:var(--control-height-touch);height:var(--control-height-touch)}
-  .frow input,.frow select{min-height:var(--control-height-touch)}
+  .frow input,.frow select,.frow textarea{min-height:var(--control-height-touch)}
   .manual-row{flex-direction:column}.manual-row .btn{align-self:stretch}
   #toast{bottom:var(--space-3);max-width:calc(100vw - 1.5rem);width:max-content}
 }
@@ -453,7 +466,7 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
       <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="12" r="1.9" fill="currentColor" stroke="none"/><path d="M6.5 12h4"/><path d="M10.5 12c3.2 0 3.6-4.5 6.8-4.5"/><path d="M10.5 12c3.2 0 3.6 4.5 6.8 4.5"/><path d="M17.3 4.6 21 7.5l-3.7 2.9"/><path d="M17.3 13.6 21 16.5l-3.7 2.9"/></svg>
       <span class="brand-copy"><span class="brand-name">codex-switch</span><span class="sub">多供应商模型路由</span></span>
     </div>
-    <nav class="tabs" role="tablist" aria-label="管理页面">
+    <nav id="managementTabs" class="tabs" role="tablist" aria-label="管理页面" aria-orientation="horizontal">
       <button id="tabbtn-providers" class="tabbtn active" role="tab" aria-selected="true" aria-controls="tab-providers" tabindex="0" onclick="switchTab('providers')">供应商</button>
       <button id="tabbtn-history" class="tabbtn" role="tab" aria-selected="false" aria-controls="tab-history" tabindex="-1" onclick="switchTab('history')">配置历史</button>
     </nav>
@@ -501,7 +514,7 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
       <div class="pane-actions"><button class="btn primary" onclick="applyCodex()">应用并备份</button><button class="btn danger" onclick="restoreCodex()">一键还原</button></div>
       <div id="codexStatus" class="status muted"></div>
       <div style="margin-top:var(--space-3);padding-top:var(--space-3);border-top:1px solid var(--color-border)">
-        <label style="display:flex;gap:var(--space-2);align-items:center;cursor:pointer;font-size:var(--font-size-body)">
+        <label class="autostart-toggle">
           <input type="checkbox" id="autostartChk" onchange="toggleAutostart()">
           <span>开机 / 登录时自动启动服务 <span class="muted">(macOS LaunchAgent,默认开启)</span></span>
         </label>
@@ -604,6 +617,7 @@ ${mergeSelectedModels.toString()}
 ${getProviderSaveProblem.toString()}
 ${deriveProviderBaseUrl.toString()}
 ${nextOptionIndex.toString()}
+${tabIndexForKey.toString()}
 ${combineCapability.toString()}
 ${discoveryStatusCopy.toString()}
 ${shouldCloseModalOnEscape.toString()}
@@ -658,6 +672,18 @@ function switchTab(name){
   if(name==='providers')loadProviders();
   if(name==='history')loadHistory();
 }
+function handleTabKeydown(event){
+  var current=event.target.closest?event.target.closest('[role="tab"]'):null;
+  if(!current)return;
+  var buttons=Array.prototype.slice.call(event.currentTarget.querySelectorAll('[role="tab"]'));
+  var currentIndex=buttons.indexOf(current);
+  var nextIndex=tabIndexForKey(currentIndex,buttons.length,event.key);
+  if(nextIndex<0)return;
+  event.preventDefault();
+  buttons[nextIndex].focus();
+  buttons[nextIndex].click();
+}
+$('managementTabs').addEventListener('keydown',handleTabKeydown);
 
 /* ---------- 供应商 ---------- */
 function loadProviders(){

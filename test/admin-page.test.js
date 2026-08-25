@@ -140,6 +140,21 @@ test('light semantic color tokens keep text, accent, and statuses at WCAG AA con
   }
 });
 
+test('default interactive boundaries reach WCAG 1.4.11 contrast on their actual surfaces', () => {
+  const html = render();
+  const tokens = cssTokens(html);
+  for (const background of ['--color-surface', '--color-surface-muted']) {
+    assert.ok(
+      contrastRatio(tokens['--color-border-strong'], tokens[background]) >= 3,
+      `--color-border-strong must reach 3:1 against ${background}`,
+    );
+  }
+  assert.match(cssRule(html, '.btn'), /border:1px solid var\(--color-border-strong\)/);
+  assert.match(cssRule(html, '.frow input,.frow select,.frow textarea'), /border:1px solid var\(--color-border-strong\)/);
+  assert.match(cssRule(html, '.xbtn'), /border:1px solid var\(--color-border-strong\)/);
+  assert.match(cssRule(html, '.slider'), /background:var\(--color-border-strong\)/);
+});
+
 test('type, spacing, control, and radius tokens establish a readable product hierarchy', () => {
   const html = render();
   const tokens = cssTokens(html);
@@ -185,9 +200,21 @@ test('narrow screens have zero-overflow structure, touch targets, and a full-hei
   assert.match(cssRule(html, '.modal-foot'), /flex:none/);
 });
 
+test('every mobile interaction family exposes a 44 by 44 pixel hit area', () => {
+  const html = render();
+  const mobile = cssAtRule(html, '@media(max-width:520px)');
+  assert.match(mobile, /\.xbtn\{[^}]*width:var\(--control-height-touch\)/);
+  assert.match(mobile, /summary\{[^}]*min-height:var\(--control-height-touch\)/);
+  assert.match(html, /<label class="autostart-toggle">/);
+  assert.match(mobile, /\.autostart-toggle\{[^}]*min-height:var\(--control-height-touch\)/);
+  assert.match(mobile, /\.switch\{[^}]*min-width:var\(--control-height-touch\)[^}]*min-height:var\(--control-height-touch\)/);
+  assert.match(mobile, /\.selected-remove\{[^}]*width:var\(--control-height-touch\)[^}]*height:var\(--control-height-touch\)/);
+  assert.match(mobile, /\.frow input,\.frow select,\.frow textarea\{[^}]*min-height:var\(--control-height-touch\)/);
+});
+
 test('tabs, panels, and import textarea expose complete programmatic semantics', () => {
   const html = render();
-  assert.match(html, /<nav class="tabs" role="tablist" aria-label="管理页面">/);
+  assert.match(html, /<nav id="managementTabs" class="tabs" role="tablist" aria-label="管理页面" aria-orientation="horizontal">/);
   assert.match(html, /id="tabbtn-providers"[^>]*role="tab"[^>]*aria-selected="true"[^>]*aria-controls="tab-providers"/);
   assert.match(html, /id="tabbtn-history"[^>]*role="tab"[^>]*aria-selected="false"[^>]*aria-controls="tab-history"/);
   assert.match(html, /id="tabbtn-providers"[^>]*tabindex="0"/);
@@ -196,6 +223,23 @@ test('tabs, panels, and import textarea expose complete programmatic semantics',
   assert.match(html, /id="tab-history"[^>]*role="tabpanel"[^>]*aria-labelledby="tabbtn-history"/);
   assert.match(html, /<label for="f-import">配置 JSON<\/label>/);
   assert.match(html, /btn\.setAttribute\('aria-selected',tabs\[i\]===name\?'true':'false'\)/);
+});
+
+test('tablist arrow, Home, and End keys move focus and activate the target view', async () => {
+  const page = await import('../src/admin-page.js');
+  assert.equal(typeof page.tabIndexForKey, 'function');
+  assert.equal(page.tabIndexForKey(0, 2, 'ArrowRight'), 1);
+  assert.equal(page.tabIndexForKey(1, 2, 'ArrowRight'), 0);
+  assert.equal(page.tabIndexForKey(0, 2, 'ArrowLeft'), 1);
+  assert.equal(page.tabIndexForKey(1, 2, 'ArrowLeft'), 0);
+  assert.equal(page.tabIndexForKey(1, 2, 'Home'), 0);
+  assert.equal(page.tabIndexForKey(0, 2, 'End'), 1);
+  assert.equal(page.tabIndexForKey(0, 2, 'Enter'), -1);
+
+  const html = render();
+  assert.match(html, /\$\('managementTabs'\)\.addEventListener\('keydown',handleTabKeydown\)/);
+  assert.match(html, /var nextIndex=tabIndexForKey\(currentIndex,buttons\.length,event\.key\)/);
+  assert.match(html, /event\.preventDefault\(\);\s*buttons\[nextIndex\]\.focus\(\);\s*buttons\[nextIndex\]\.click\(\)/);
 });
 
 test('rendered theme excludes decorative AI-console patterns and layout-property motion', () => {
