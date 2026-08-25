@@ -45,6 +45,7 @@ mkdir -p "$RES/app/src"
 cp src/*.js "$RES/app/src/"
 mkdir -p "$RES/app/scripts"
 cp scripts/prepare-ca.sh "$RES/app/scripts/"
+cp scripts/launch-server.sh "$RES/app/scripts/"
 # App 图标(assets/logo.svg → assets/app.icns,iconutil 编译产物)
 [ -f assets/app.icns ] && cp assets/app.icns "$RES/app.icns"
 ( cd "$RES/app" && npm ci --omit=dev --ignore-scripts --no-fund --no-audit --loglevel=error )
