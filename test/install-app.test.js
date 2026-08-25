@@ -189,6 +189,8 @@ function createFixture(t, {
   fs.mkdirSync(tagDir);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.mkdirSync(path.join(mount, 'Codex Switch.app'), { recursive: true });
+  fs.mkdirSync(path.join(mount, 'Codex Switch.app', 'Contents', 'MacOS'), { recursive: true });
+  fs.symlinkSync(process.execPath, path.join(mount, 'Codex Switch.app', 'Contents', 'MacOS', 'node'));
 
   const version = tag.slice(1);
   const dmgName = `CodexSwitch-${version}-macos-arm64.dmg`;
@@ -930,7 +932,9 @@ test('a local DMG bypasses curl and preserves the installation/launch path', (t)
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.equal(readLog(fixture.logs.curl).length, 0);
-  assert.match(readLog(fixture.logs.install).join('\n'), new RegExp(fixture.dest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(fs.lstatSync(fixture.dest).isSymbolicLink(), false);
+  assert.equal(fs.statSync(fixture.dest).isDirectory(), true);
+  assert.equal(fs.existsSync(path.join(fixture.dest, 'Contents', 'MacOS', 'node')), true);
   assert.match(readLog(fixture.logs.open).join('\n'), new RegExp(fixture.dest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
@@ -985,5 +989,38 @@ test('installer rejects destination symlink escapes before mount or copy', (t) =
   assert.match(result.stderr, /安装目标.*无效|拒绝.*安装目标/);
   assert.equal(readLog(fixture.logs.hdiutil).length, 0);
   assert.equal(readLog(fixture.logs.install).length, 0);
+  assert.equal(fs.existsSync(path.join(outside, 'Codex Switch.app')), false);
+});
+
+test('installer never follows a destination symlink swapped in after validation', (t) => {
+  const fixture = createFixture(t);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-installer-race-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const sentinel = path.join(outside, 'sentinel.txt');
+  fs.writeFileSync(sentinel, 'outside must survive');
+  fs.mkdirSync(fixture.dest, { recursive: true });
+  fs.writeFileSync(path.join(fixture.dest, 'old.txt'), 'old install');
+
+  const mountedNode = path.join(fixture.env.FAKE_MOUNT, 'Codex Switch.app', 'Contents', 'MacOS', 'node');
+  const helperMarker = path.join(fixture.root, 'atomic-helper-invoked');
+  fs.unlinkSync(mountedNode);
+  writeExecutable(mountedNode, String.raw`#!/bin/sh
+set -eu
+printf 'invoked\n' > "$FIXTURE_HELPER_MARKER"
+/bin/rm -rf "$CODEX_SWITCH_INSTALL_DEST"
+/bin/ln -s "$FIXTURE_ATTACK_TARGET" "$CODEX_SWITCH_INSTALL_DEST"
+exec "$FIXTURE_REAL_NODE" "$@"
+`);
+  fixture.env.FIXTURE_ATTACK_TARGET = outside;
+  fixture.env.FIXTURE_REAL_NODE = process.execPath;
+  fixture.env.FIXTURE_HELPER_MARKER = helperMarker;
+
+  const result = runInstaller(fixture, fixture.dmg);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(fs.readFileSync(helperMarker, 'utf8'), 'invoked\n');
+  assert.equal(fs.lstatSync(fixture.dest).isSymbolicLink(), false);
+  assert.equal(fs.statSync(fixture.dest).isDirectory(), true);
+  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'outside must survive');
   assert.equal(fs.existsSync(path.join(outside, 'Codex Switch.app')), false);
 });

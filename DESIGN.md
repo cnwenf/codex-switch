@@ -162,7 +162,7 @@ adapter table 隔离异构 API：
 - Ark/Azure 必须选择用户手工输入的 Endpoint/Deployment ID；静态参考模型不可选择成路由。
 - Custom、静态目录和已有 provider 可在明确的 unverified 状态下保存；UI 会说明首次调用为准。
 
-已有 Key 只在编辑同一已保存 provider，且服务端规范化后的完整连接身份（`provider_type`、authoritative `base_url`、`provider_options`）逐字节一致时由本地后端使用。Custom/NIM URL 或任一安全关键连接选项变化时，保存请求必须原子携带新 Key；拒绝时保留原配置和凭证。发现缓存也只写入同 ID、同连接身份且仍启用的 provider，避免跨 provider、ID 复用或未保存表单污染 catalog。
+新增 bearer provider 必须在同一次请求中提交新的 `api_key`；即使请求给出的 `token_env` 在当前进程中已有值，服务端也不会借用或重新绑定它。编辑只有在规范化后的完整连接身份（`provider_type`、authoritative `base_url`、`provider_options`）逐字节一致，且仍引用该 provider 原来的 `token_env` 时，才可沿用已保存 Key。连接或凭证引用变化必须原子携带新 Key；拒绝或持久化失败会恢复原 config、env 文件、受影响的 `process.env` 值，以及 capability cache 原有 metadata 和 TTL。
 
 ## 10. 能力规范化与缓存优先级
 
@@ -192,7 +192,7 @@ adapter table 隔离异构 API：
 3. 内置静态表；
 4. 保守默认（128K、无视觉、不声明 reasoning effort）。
 
-缓存以 provider ID 索引，但每条记录同时绑定不含 Key/token 的完整规范化连接身份和 30 分钟 TTL。provider 删除、停用或连接身份变化会立即失效；`resolveCaps` 在读取时再次核对 TTL 与连接身份，过期、ID 复用或不匹配均 fail closed 到静态/默认能力。发现的 unknown image 不覆盖静态值，明确 false 可以覆盖；明确 reasoning false 会清空静态 reasoning levels。能力只改变 `catalog.json`，不改变路由请求。
+缓存以 provider ID 索引，但每条记录同时绑定不含 Key/token 的完整规范化连接身份和 30 分钟 TTL。每次 provider 或其 credential 变更都会推进内存 generation，并撤销该 provider 仍在执行的 refresh lease；每个异步发现完成时再次核对当前 ID、启用状态、连接身份、generation 和最新 lease，旧请求因此不能在删除/重建、改 URL、换 Key或并发刷新后覆盖新缓存。provider 删除、停用或连接身份变化也会立即失效；`resolveCaps` 在读取时再次核对 TTL 与连接身份，过期、ID 复用或不匹配均 fail closed 到静态/默认能力。generation/lease 只存在于当前进程，重启后缓存本来也为空。发现的 unknown image 不覆盖静态值，明确 false 可以覆盖；明确 reasoning false 会清空静态 reasoning levels。能力只改变 `catalog.json`，不改变路由请求。
 
 ## 11. 安全限制
 
@@ -207,6 +207,7 @@ adapter table 隔离异构 API：
 - 初始 URL、redirect、pagination link、cursor/path/query/fragment 都检查原始及最多三层 percent decoding，畸形或过深编码 fail closed。
 - 单请求超时 10 秒；JSON response 最多 4 MiB；最多 5 页、2,000 个模型。越界时立即取消 reader 并返回稳定错误。
 - 上游错误正文和内部 stack 不返回浏览器；HTTP 状态映射成固定 validation state/message。
+- DMG 安装先把应用复制到已规范化 Applications 父目录内的随机 staging，再用 DMG 内置 Node 的 `rename(2)` 将旧目标移到同目录随机 backup、把 staging 原子改名为最终 `.app`；最终路径若在校验后被换成 symlink，只移动/替换链接本身，不跟随到链接目标。清理只作用于安装器自己在该父目录创建的随机 staging/backup 和下载临时目录。断电或恶意并发导致第二次 rename 失败时安装会 fail closed，并可能保留随机 backup 供手工恢复；这里不宣称跨断电事务。
 
 这些限制降低 SSRF、Bearer 跨域转发、无限分页、内存放大和错误正文泄密风险。它们不把未验证的 Custom endpoint 升级成可信厂商。
 

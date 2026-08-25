@@ -93,9 +93,22 @@ esac
 # Fail closed before creating download state, mounting a DMG, stopping an old
 # process, or invoking rm/cp with a caller-controlled destination.
 validate_install_destination
+# Freeze the target to the already resolved physical parent. Later validation
+# never re-enters a caller-controlled parent symlink.
+DEST="$physical_parent/$APP_NAME.app"
 
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/codex-switch.XXXXXX" 2>/dev/null) || die "无法创建安全的临时目录。"
-trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
+INSTALL_STAGE=
+cleanup_installer() {
+  /bin/rm -rf "$WORK_DIR"
+  if [ -n "$INSTALL_STAGE" ]; then
+    case "$INSTALL_STAGE" in
+      "$physical_parent"/.codex-switch-stage.*) /bin/rm -rf "$INSTALL_STAGE" ;;
+      *) say "跳过清理异常 staging 路径: $INSTALL_STAGE" ;;
+    esac
+  fi
+}
+trap cleanup_installer EXIT INT TERM
 
 remaining_seconds() {
   remaining_now=$(date +%s) || return 1
@@ -553,11 +566,72 @@ say "已挂载: $MOUNT"
 
 SRC_APP="$MOUNT/$APP_NAME.app"
 [ -d "$SRC_APP" ] || die "DMG 中未找到 $APP_NAME.app"
+[ ! -L "$SRC_APP" ] || die "DMG 中的 $APP_NAME.app 不能是软链接"
+INSTALL_NODE="$SRC_APP/Contents/MacOS/node"
+[ -x "$INSTALL_NODE" ] || die "DMG 中缺少可执行的内置 Node，拒绝非原子安装。"
 
 say "安装到 $DEST…"
 validate_install_destination
-rm -rf "$DEST"
-cp -R "$SRC_APP" "$DEST"
+INSTALL_STAGE=$(mktemp -d "$physical_parent/.codex-switch-stage.XXXXXX" 2>/dev/null) \
+  || die "无法在 Applications 目录创建安全 staging。"
+STAGED_APP="$INSTALL_STAGE/$APP_NAME.app"
+/bin/cp -R "$SRC_APP" "$STAGED_APP"
+[ -d "$STAGED_APP" ] && [ ! -L "$STAGED_APP" ] \
+  || die "staging 中的应用不完整，已停止安装。"
+
+# Node ships inside the signed app, so the installer does not depend on a
+# system scripting runtime. fs.renameSync maps to rename(2): the final path is
+# replaced without following a symlink swapped in after validation. The backup
+# and staging names are generated under the validated physical parent only.
+"$INSTALL_NODE" - "$STAGED_APP" "$DEST" "$physical_parent" <<'NODE_INSTALL'
+const fs = require('node:fs');
+const path = require('node:path');
+
+const [stagedApp, destination, physicalParent] = process.argv.slice(2);
+const appName = 'Codex Switch.app';
+const stageRoot = path.dirname(stagedApp);
+const expectedDestination = path.join(physicalParent, appName);
+if (destination !== expectedDestination
+    || path.dirname(stageRoot) !== physicalParent
+    || !path.basename(stageRoot).startsWith('.codex-switch-stage.')) {
+  throw new Error('refusing paths outside the validated Applications parent');
+}
+if (fs.realpathSync(physicalParent) !== physicalParent) {
+  throw new Error('validated Applications parent identity changed');
+}
+const stagedStat = fs.lstatSync(stagedApp);
+if (!stagedStat.isDirectory() || stagedStat.isSymbolicLink()) {
+  throw new Error('staged app must be a real directory');
+}
+
+const backup = fs.mkdtempSync(path.join(physicalParent, '.codex-switch-backup.'));
+fs.rmdirSync(backup);
+let movedPrevious = false;
+try {
+  try {
+    fs.lstatSync(destination);
+    fs.renameSync(destination, backup);
+    movedPrevious = true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  fs.renameSync(stagedApp, destination);
+} catch (error) {
+  if (movedPrevious) {
+    try {
+      fs.lstatSync(destination);
+    } catch (destinationError) {
+      if (destinationError.code === 'ENOENT') {
+        try { fs.renameSync(backup, destination); } catch { /* Preserve backup for manual recovery. */ }
+      }
+    }
+  }
+  throw error;
+}
+if (movedPrevious) fs.rmSync(backup, { recursive: true, force: false });
+NODE_INSTALL
+/bin/rmdir "$INSTALL_STAGE"
+INSTALL_STAGE=
 hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
 
 # ---------- 5. 收尾:防御性清理隔离属性 + 放行 ----------

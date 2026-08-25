@@ -174,6 +174,28 @@ function authPlan(provider) {
 // GET 只返回 {name, configured};文件 chmod 600,原子写入(tmp+rename)。
 const ENV_FILE = path.join(os.homedir(), '.codex-switch', 'env');
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const providerMutationGenerations = new Map();
+const providerRefreshLeases = new Map();
+let nextProviderRefreshLease = 0;
+
+function bumpProviderGenerations(providerIds) {
+  for (const providerId of new Set(providerIds.filter(Boolean))) {
+    providerMutationGenerations.set(providerId, (providerMutationGenerations.get(providerId) || 0) + 1);
+    providerRefreshLeases.delete(providerId);
+  }
+}
+
+function providersUsingTokenEnv(tokenEnv) {
+  return (getConfig().providers || [])
+    .filter((provider) => provider?.token_env === tokenEnv)
+    .map((provider) => provider.id);
+}
+
+function invalidateProvidersForCredentialMutation(tokenEnv) {
+  const providerIds = providersUsingTokenEnv(tokenEnv);
+  bumpProviderGenerations(providerIds);
+  for (const providerId of providerIds) invalidateDiscoveredModels(providerId);
+}
 
 function allowedEnvNames() {
   const names = new Set();
@@ -281,6 +303,7 @@ function saveEnvKey(name, value) {
   entries.set(name, value);
   writeEnvFile(entries);
   process.env[name] = value; // 当前进程立即生效
+  invalidateProvidersForCredentialMutation(name);
   console.log(`[codex-switch] env key saved: ${name} (value never logged)`);
   return { ok: true, name };
 }
@@ -291,6 +314,7 @@ function deleteEnvKey(name) {
   const removed = entries.delete(name);
   writeEnvFile(entries);
   delete process.env[name];
+  invalidateProvidersForCredentialMutation(name);
   console.log(`[codex-switch] env key removed: ${name}`);
   return { ok: true, name, removed };
 }
@@ -803,6 +827,30 @@ function applyToCodex() {
 // ---------- capability refresh (provider discovery, cached 30 min) ----------
 // Discovery is advisory and only affects the generated catalog. A failed refresh
 // keeps any valid previous cache entry and never affects request forwarding.
+function beginProviderRefreshLease(provider) {
+  const normalized = normalizeProvider(provider);
+  const lease = {
+    providerId: normalized.id,
+    connectionIdentity: providerConnectionIdentity(normalized),
+    mutationGeneration: providerMutationGenerations.get(normalized.id) || 0,
+    leaseId: ++nextProviderRefreshLease,
+  };
+  providerRefreshLeases.set(normalized.id, lease.leaseId);
+  return { normalized, lease };
+}
+
+function providerRefreshLeaseIsCurrent(lease) {
+  if (!lease || providerRefreshLeases.get(lease.providerId) !== lease.leaseId) return false;
+  if ((providerMutationGenerations.get(lease.providerId) || 0) !== lease.mutationGeneration) return false;
+  const current = (getConfig().providers || []).find((provider) => provider?.id === lease.providerId);
+  if (!current || current.enabled === false) return false;
+  try {
+    return providerConnectionIdentity(current) === lease.connectionIdentity;
+  } catch {
+    return false;
+  }
+}
+
 async function refreshProviderCaps(provider, force) {
   if (!provider || provider.enabled === false) return { provider: provider?.id || '', status: 'skipped' };
   let normalized;
@@ -817,6 +865,7 @@ async function refreshProviderCaps(provider, force) {
     }
   }
   if (normalized.auth !== 'bearer') return { provider: provider.id, status: 'skipped' };
+  const { lease } = beginProviderRefreshLease(normalized);
   try {
       const apiKey = (provider.token_env && process.env[provider.token_env]) || provider.token || '';
       const discovered = await discoverProvider({
@@ -827,6 +876,9 @@ async function refreshProviderCaps(provider, force) {
       });
       const discoveryStatus = discovered.validation.status;
       if (discovered.models.length || discoveryStatus === 'valid') {
+        if (!providerRefreshLeaseIsCurrent(lease)) {
+          return { provider: provider.id, status: 'superseded', models: discovered.models.length };
+        }
         cacheDiscoveredModels(normalized, discovered.models);
         return {
           provider: provider.id,
@@ -1023,6 +1075,14 @@ function mutateProviders(fn) {
   fs.writeFileSync(CONFIG_PATH, text);
   cfgMtime = 0; loadConfig();
   const nextProviders = new Map((cfg.providers || []).map((provider) => [provider.id, provider]));
+  const previousProvidersById = new Map(previousProviders.map((provider) => [provider.id, provider]));
+  const mutatedProviderIds = new Set([...previousProvidersById.keys(), ...nextProviders.keys()]);
+  for (const providerId of [...mutatedProviderIds]) {
+    if (JSON.stringify(previousProvidersById.get(providerId)) === JSON.stringify(nextProviders.get(providerId))) {
+      mutatedProviderIds.delete(providerId);
+    }
+  }
+  bumpProviderGenerations([...mutatedProviderIds]);
   for (const previous of previousProviders) {
     const next = nextProviders.get(previous.id);
     let sameConnection = false;
@@ -1047,17 +1107,42 @@ function submittedApiKey(input) {
   return input.api_key.trim();
 }
 
-function captureProviderPersistenceState(tokenEnv) {
+function cloneCapabilityCache() {
+  return new Map([...capsCache].map(([providerId, entry]) => [providerId, {
+    ...entry,
+    models: new Map([...entry.models].map(([modelId, metadata]) => [modelId, { ...metadata }])),
+  }]));
+}
+
+function restoreCapabilityCache(snapshot) {
+  capsCache.clear();
+  for (const [providerId, entry] of snapshot) {
+    capsCache.set(providerId, {
+      ...entry,
+      models: new Map([...entry.models].map(([modelId, metadata]) => [modelId, { ...metadata }])),
+    });
+  }
+}
+
+function captureProviderPersistenceState(tokenEnvs, providerIds) {
+  const processValues = new Map();
+  for (const tokenEnv of new Set(tokenEnvs.filter(Boolean))) {
+    processValues.set(tokenEnv, {
+      had: Object.prototype.hasOwnProperty.call(process.env, tokenEnv),
+      value: process.env[tokenEnv],
+    });
+  }
   return {
     config: fs.readFileSync(CONFIG_PATH, 'utf8'),
     envExists: fs.existsSync(ENV_FILE),
     envText: fs.existsSync(ENV_FILE) ? fs.readFileSync(ENV_FILE, 'utf8') : '',
-    processHadKey: Object.prototype.hasOwnProperty.call(process.env, tokenEnv),
-    processValue: process.env[tokenEnv],
+    processValues,
+    capabilityCache: cloneCapabilityCache(),
+    providerIds: [...new Set(providerIds.filter(Boolean))],
   };
 }
 
-function restoreProviderPersistenceState(state, tokenEnv) {
+function restoreProviderPersistenceState(state) {
   fs.writeFileSync(CONFIG_PATH, state.config);
   cfgMtime = 0;
   loadConfig();
@@ -1067,16 +1152,22 @@ function restoreProviderPersistenceState(state, tokenEnv) {
   } else {
     try { fs.unlinkSync(ENV_FILE); } catch {}
   }
-  if (state.processHadKey) process.env[tokenEnv] = state.processValue;
-  else delete process.env[tokenEnv];
+  for (const [tokenEnv, previous] of state.processValues) {
+    if (previous.had) process.env[tokenEnv] = previous.value;
+    else delete process.env[tokenEnv];
+  }
+  restoreCapabilityCache(state.capabilityCache);
+  // Never revive a lease that started before or during a failed mutation.
+  bumpProviderGenerations(state.providerIds);
 }
 
 async function addProvider(p) {
   const np = normalizeProvider(p);
   requireBearerCred(np);
   const apiKey = submittedApiKey(p);
+  if (np.auth === 'bearer' && !apiKey) throw new Error('新增 bearer provider 必须同时填写新的 API Key');
   if (apiKey && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
-  const state = captureProviderPersistenceState(np.token_env || '');
+  const state = captureProviderPersistenceState([np.token_env], [np.id]);
   let result;
   try {
     result = mutateProviders((providers) => {
@@ -1086,7 +1177,7 @@ async function addProvider(p) {
     });
     if (apiKey) saveEnvKey(np.token_env, apiKey);
   } catch (error) {
-    if (result) restoreProviderPersistenceState(state, np.token_env || '');
+    if (result) restoreProviderPersistenceState(state);
     throw error;
   }
   const capabilityRefresh = await refreshProviderCapsById(np.id, true);
@@ -1100,12 +1191,20 @@ async function updateProvider(origId, p) {
   if (!original) throw new Error(`未找到 provider '${origId}'`);
   let connectionChanged = true;
   try { connectionChanged = providerConnectionIdentity(original) !== providerConnectionIdentity(np); } catch {}
-  const hasNewInlineToken = Boolean(np.token && np.token !== original.token);
-  if (np.auth === 'bearer' && connectionChanged && !apiKey && !hasNewInlineToken) {
-    throw new Error('连接信息已变化，必须同时填写新的 API Key');
+  const submittedTokenEnv = typeof p.token_env === 'string' ? p.token_env.trim() : '';
+  const canReuseOriginalCredential = original.auth === 'bearer'
+    && !connectionChanged
+    && (!submittedTokenEnv || submittedTokenEnv === original.token_env);
+  if (np.auth === 'bearer' && !apiKey && !canReuseOriginalCredential) {
+    throw new Error(connectionChanged
+      ? '连接信息已变化，必须同时填写新的 API Key'
+      : '凭证引用已变化，必须同时填写新的 API Key');
   }
   if (apiKey && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
-  const state = captureProviderPersistenceState(np.token_env || original.token_env || '');
+  const state = captureProviderPersistenceState(
+    [np.token_env, original.token_env],
+    [origId, np.id],
+  );
   let result;
   try {
     result = mutateProviders((providers) => {
@@ -1125,7 +1224,7 @@ async function updateProvider(origId, p) {
     if (apiKey) saveEnvKey(np.token_env, apiKey);
     else if (p.delete_key === true && np.token_env) deleteEnvKey(np.token_env);
   } catch (error) {
-    if (result) restoreProviderPersistenceState(state, np.token_env || original.token_env || '');
+    if (result) restoreProviderPersistenceState(state);
     throw error;
   }
   const capabilityRefresh = await refreshProviderCapsById(np.id, true);
@@ -1240,6 +1339,8 @@ async function discoverProviderForAdmin(req, res, body) {
   }
   const explicitKey = input.apiKey;
   const apiKey = explicitKey || resolveSavedProviderKey(input);
+  const cacheProvider = resolveDiscoveryCacheProvider(input);
+  const cacheLease = cacheProvider ? beginProviderRefreshLease(cacheProvider).lease : null;
   const controller = new AbortController();
   const abort = () => controller.abort(new Error('admin discovery request closed'));
   const abortOnClose = () => { if (!res.writableEnded) abort(); };
@@ -1253,8 +1354,9 @@ async function discoverProviderForAdmin(req, res, body) {
       apiKey,
       signal: controller.signal,
     });
-    const cacheProvider = resolveDiscoveryCacheProvider(input);
-    if (cacheProvider && result.models.length) cacheDiscoveredModels(cacheProvider, result.models);
+    if (cacheProvider && result.models.length && providerRefreshLeaseIsCurrent(cacheLease)) {
+      cacheDiscoveredModels(cacheProvider, result.models);
+    }
     return sendJson(res, 200, result);
   } catch {
     return sendJson(res, 500, { error: 'provider discovery failed' });
