@@ -63,7 +63,9 @@ Key/连接检测不是简单布尔值，页面会区分：`valid`、`invalid`、
 
 ### macOS App（DMG）
 
-适用于 Apple Silicon（arm64）Mac，无需预装 Node 或 git。GitHub Release 发布与 DMG asset 上传存在异步窗口；当前安装器对这个窗口的精确 tag 轮询和 checksum 校验仍待 Task 9 实现。因此源码版本号、Release 页面出现或 `latest` 更新，都不能单独证明对应 DMG 已经可下载并校验。
+适用于 Apple Silicon（arm64）Mac，无需预装 Node 或 git。发布 GitHub Release 后，GitHub Actions 会从该精确 tag 自动构建 `CodexSwitch-<版本>-macos-arm64.dmg` 和同名 `.sha256`，验证签名、DMG 与 checksum 后再成对上传。Release 必须保持 `immutable=false` 直到资产上传完成；如果 GitHub REST 不返回 `immutable` 字段，或 Release 已 immutable，workflow 会安全失败而不会猜测或覆盖资产。
+
+Release 发布与 DMG asset 上传存在异步窗口。一键安装器只查询一次 `latest` 来锁定 tag，随后在约 12 分钟的有界退避内轮询这个精确 tag；必须同时看到 DMG 和 `.sha256` 才会下载，checksum 格式和内容校验通过后才会挂载。它不会退回旧版本；超时会显示锁定的 Release 页面和重跑命令。
 
 一键安装：
 
@@ -76,6 +78,8 @@ curl -fsSL https://raw.githubusercontent.com/cnwenf/codex-switch/main/scripts/in
 ```sh
 sh scripts/install-app.sh /path/to/CodexSwitch.dmg
 ```
+
+显式传入 DMG URL 或本地路径时，安装器不会访问 GitHub Release API，也不会强制下载远端 checksum，适合测试或离线安装；这两种来源需要使用者自行确认可信性。
 
 浏览器下载的 ad-hoc 签名 App 可能带 macOS 隔离属性。首次打开可在 Finder 中右键“打开”，或执行：
 
