@@ -157,12 +157,14 @@ adapter table 隔离异构 API：
 保存规则：
 
 - unsupported 不能保存。
-- 新 bearer provider 必须有新 Key 或已保存 Key；confirmed invalid 不能保存。
+- 新 bearer provider 必须在保存请求中携带新 Key；confirmed invalid 不能保存。
 - 至少选择或手工输入一个可路由 model ID。
 - Ark/Azure 必须选择用户手工输入的 Endpoint/Deployment ID；静态参考模型不可选择成路由。
 - Custom、静态目录和已有 provider 可在明确的 unverified 状态下保存；UI 会说明首次调用为准。
 
-新增 bearer provider 必须在同一次请求中提交新的 `api_key`；即使请求给出的 `token_env` 在当前进程中已有值，服务端也不会借用或重新绑定它。编辑只有在规范化后的完整连接身份（`provider_type`、authoritative `base_url`、`provider_options`）逐字节一致，且仍引用该 provider 原来的 `token_env` 时，才可沿用已保存 Key。连接或凭证引用变化必须原子携带新 Key；拒绝或持久化失败会恢复原 config、env 文件、受影响的 `process.env` 值，以及 capability cache 原有 metadata 和 TTL。
+新增 bearer provider 必须在同一次 JSON 保存请求中提交新的 `api_key`；即使请求给出的 `token_env` 在当前进程中已有值，服务端也不会借用或重新绑定它。编辑只有在规范化后的完整连接身份（`provider_type`、authoritative `base_url`、`provider_options`）、实际持久化的 runtime `base_url` 和原 `token_env` 均未改变时，才可沿用已保存 Key。连接、`token_env` 或 legacy inline `token` 变化必须原子携带新 Key；拒绝或持久化失败会恢复原 config、env 文件、受影响的 `process.env` 值，以及 capability cache 原有 metadata 和 TTL。
+
+`POST /__admin/config` 是 `text/plain`，配置历史恢复也只有 TOML 快照，两者都没有同请求 `api_key` 字段。因此这两个入口允许修改名称、模型、启停等非凭据字段，但对新增 bearer、把现有 provider 改成 bearer、改 bearer runtime/规范化连接、重绑 `token_env` 或修改 inline `token` 一律 fail closed 为 400；需要这些变化时必须走 provider JSON 保存入口。`GET /__admin/config`、非凭据 raw import 和安全的历史恢复保持兼容。
 
 ## 10. 能力规范化与缓存优先级
 
@@ -192,7 +194,7 @@ adapter table 隔离异构 API：
 3. 内置静态表；
 4. 保守默认（128K、无视觉、不声明 reasoning effort）。
 
-缓存以 provider ID 索引，但每条记录同时绑定不含 Key/token 的完整规范化连接身份和 30 分钟 TTL。每次 provider 或其 credential 变更都会推进内存 generation，并撤销该 provider 仍在执行的 refresh lease；每个异步发现完成时再次核对当前 ID、启用状态、连接身份、generation 和最新 lease，旧请求因此不能在删除/重建、改 URL、换 Key或并发刷新后覆盖新缓存。provider 删除、停用或连接身份变化也会立即失效；`resolveCaps` 在读取时再次核对 TTL 与连接身份，过期、ID 复用或不匹配均 fail closed 到静态/默认能力。generation/lease 只存在于当前进程，重启后缓存本来也为空。发现的 unknown image 不覆盖静态值，明确 false 可以覆盖；明确 reasoning false 会清空静态 reasoning levels。能力只改变 `catalog.json`，不改变路由请求。
+缓存以 provider ID 索引，但每条记录同时绑定不含 Key/token 的完整规范化连接身份和 30 分钟 TTL。provider CRUD、toggle/delete、允许的 raw config 写入、配置历史恢复和 env Key 保存/删除全部进入同一套 mutation 失效语义：先对所有语义发生变化的 provider 推进内存 generation、撤销 refresh lease 并删除 identity-bound cache，然后才让新 config/credential 可见。`refreshAllCaps` 只是写入后的能力补充，不承担安全失效。每个异步发现完成时再次核对当前 ID、启用状态、连接身份、generation 和最新 lease，旧请求因此不能在删除/重建、改 URL、换 Key、raw import、历史恢复或并发刷新后覆盖新缓存；即使新一轮刷新被前一个 provider 阻塞也一样。`resolveCaps` 在读取时再次核对 TTL 与连接身份，过期、ID 复用或不匹配均 fail closed 到静态/默认能力。generation/lease 只存在于当前进程，重启后缓存本来也为空。发现的 unknown image 不覆盖静态值，明确 false 可以覆盖；明确 reasoning false 会清空静态 reasoning levels。能力只改变 `catalog.json`，不改变路由请求。
 
 ## 11. 安全限制
 

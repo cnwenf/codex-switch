@@ -185,6 +185,12 @@ function bumpProviderGenerations(providerIds) {
   }
 }
 
+function invalidateProviderMutationState(providerIds) {
+  const uniqueProviderIds = [...new Set(providerIds.filter(Boolean))];
+  bumpProviderGenerations(uniqueProviderIds);
+  for (const providerId of uniqueProviderIds) invalidateDiscoveredModels(providerId);
+}
+
 function providersUsingTokenEnv(tokenEnv) {
   return (getConfig().providers || [])
     .filter((provider) => provider?.token_env === tokenEnv)
@@ -193,8 +199,7 @@ function providersUsingTokenEnv(tokenEnv) {
 
 function invalidateProvidersForCredentialMutation(tokenEnv) {
   const providerIds = providersUsingTokenEnv(tokenEnv);
-  bumpProviderGenerations(providerIds);
-  for (const providerId of providerIds) invalidateDiscoveredModels(providerId);
+  invalidateProviderMutationState(providerIds);
 }
 
 function allowedEnvNames() {
@@ -300,10 +305,11 @@ function saveEnvKey(name, value) {
   if (typeof value !== 'string' || !value.trim()) throw new Error('Key 值不能为空(要移除请用「清除」)');
   if (value.length > 4096) throw new Error('Key 值过长');
   const entries = readEnvFileEntries();
+  // Revoke stale discovery before the new credential can become visible.
+  invalidateProvidersForCredentialMutation(name);
   entries.set(name, value);
   writeEnvFile(entries);
   process.env[name] = value; // 当前进程立即生效
-  invalidateProvidersForCredentialMutation(name);
   console.log(`[codex-switch] env key saved: ${name} (value never logged)`);
   return { ok: true, name };
 }
@@ -311,10 +317,11 @@ function saveEnvKey(name, value) {
 function deleteEnvKey(name) {
   if (!ENV_NAME_RE.test(name)) throw new Error('非法的环境变量名');
   const entries = readEnvFileEntries();
+  // Revoke stale discovery before the credential can disappear.
+  invalidateProvidersForCredentialMutation(name);
   const removed = entries.delete(name);
   writeEnvFile(entries);
   delete process.env[name];
-  invalidateProvidersForCredentialMutation(name);
   console.log(`[codex-switch] env key removed: ${name}`);
   return { ok: true, name, removed };
 }
@@ -1048,50 +1055,134 @@ function listHistory() {
     .sort((a, b) => (a.time === b.time ? b.seq.localeCompare(a.seq) : b.time.localeCompare(a.time)));
 }
 
+function stableConfigValue(value) {
+  if (Array.isArray(value)) return value.map(stableConfigValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableConfigValue(value[key])]));
+  }
+  return value;
+}
+
+function providerMapForMutation(config, source) {
+  const providers = config?.providers === undefined ? [] : config.providers;
+  if (!Array.isArray(providers)) throw new Error(`${source}: providers 必须是数组`);
+  const byId = new Map();
+  const order = [];
+  for (const provider of providers) {
+    const providerId = typeof provider?.id === 'string' ? provider.id.trim() : '';
+    if (!providerId || !/^[A-Za-z0-9_.-]+$/.test(providerId)) {
+      throw new Error(`${source}: provider id 无效`);
+    }
+    if (byId.has(providerId)) throw new Error(`${source}: provider '${providerId}' 重复`);
+    byId.set(providerId, provider);
+    order.push(providerId);
+  }
+  return { byId, order };
+}
+
+function providerMutationPlan(previousConfig, nextConfig, source) {
+  const previous = providerMapForMutation(previousConfig, source);
+  const next = providerMapForMutation(nextConfig, source);
+  const changedProviderIds = new Set([...previous.byId.keys(), ...next.byId.keys()]);
+  for (const providerId of [...changedProviderIds]) {
+    const before = previous.byId.get(providerId);
+    const after = next.byId.get(providerId);
+    if (JSON.stringify(stableConfigValue(before)) === JSON.stringify(stableConfigValue(after))) {
+      changedProviderIds.delete(providerId);
+    }
+  }
+  if (previous.order.join('\0') !== next.order.join('\0')) {
+    for (const providerId of [...previous.order, ...next.order]) changedProviderIds.add(providerId);
+  }
+  return { previous, next, changedProviderIds };
+}
+
+function runtimeProviderConnectionIdentity(provider) {
+  return JSON.stringify({
+    normalized: providerConnectionIdentity(provider),
+    // Routing reads the persisted base_url directly, so include its exact runtime value
+    // even when a preset would normally derive another authoritative URL.
+    runtimeBaseUrl: String(provider?.base_url || '').trim(),
+  });
+}
+
+function bearerCredentialReference(provider) {
+  return JSON.stringify({
+    tokenEnv: typeof provider?.token_env === 'string' ? provider.token_env.trim() : '',
+    legacyInlineToken: typeof provider?.token === 'string' ? provider.token : '',
+  });
+}
+
+function validateBearerMutation(plan, authorizedBearerProviderIds, source) {
+  const authorized = new Set(authorizedBearerProviderIds);
+  for (const providerId of plan.changedProviderIds) {
+    const before = plan.previous.byId.get(providerId);
+    const after = plan.next.byId.get(providerId);
+    if (!after || String(after.auth || 'bearer').trim() !== 'bearer') continue;
+
+    let normalizedAfter;
+    try { normalizedAfter = normalizeProvider(after); } catch (error) {
+      throw new Error(`${source}: provider '${providerId}' 无效: ${error.message}`);
+    }
+    requireBearerCred(normalizedAfter);
+
+    let requiresNewKey = !before || String(before.auth || 'bearer').trim() !== 'bearer';
+    if (!requiresNewKey) {
+      try {
+        requiresNewKey = runtimeProviderConnectionIdentity(before) !== runtimeProviderConnectionIdentity(after)
+          || bearerCredentialReference(before) !== bearerCredentialReference(after);
+      } catch (error) {
+        throw new Error(`${source}: provider '${providerId}' 无效: ${error.message}`);
+      }
+    }
+    if (requiresNewKey && !authorized.has(providerId)) {
+      throw new Error(`${source}: provider '${providerId}' 的 bearer 连接或凭证变化必须通过供应商表单，并在同一请求提交新的 API Key`);
+    }
+  }
+}
+
+// Every real config write enters here. Provider generation/lease/cache state is
+// invalidated synchronously before the new config can be observed by any request.
+function writeConfigMutation(text, {
+  authorizedBearerProviderIds = [],
+  source = 'config 写入',
+  snapshot = true,
+} = {}) {
+  let nextConfig;
+  try { nextConfig = TOML.parse(text); } catch (error) {
+    throw new Error(`${source}: TOML parse failed: ${error.message}`);
+  }
+  loadConfig();
+  const plan = providerMutationPlan(cfg, nextConfig, source);
+  validateBearerMutation(plan, authorizedBearerProviderIds, source);
+  if (snapshot) snapshotConfig();
+  invalidateProviderMutationState([...plan.changedProviderIds]);
+  fs.writeFileSync(CONFIG_PATH, text);
+  cfgMtime = 0;
+  loadConfig();
+  return plan;
+}
+
 function restoreHistory(file) {
   const safe = path.basename(file);
   const src = path.join(HISTORY_DIR, safe);
   if (!fs.existsSync(src)) throw new Error(`快照不存在: ${safe}`);
   const text = fs.readFileSync(src, 'utf8');
-  try { TOML.parse(text); } catch (e) { throw new Error(`快照不是合法 TOML,拒绝还原: ${e.message}`); }
-  snapshotConfig(); // 先给当前状态留一份后悔药
-  fs.writeFileSync(CONFIG_PATH, text);
-  cfgMtime = 0; loadConfig();
+  writeConfigMutation(text, { source: 'history restore' });
   return safe;
 }
 
-// 所有 provider 变更的统一通道:解析 → 变更 → 重组 TOML → 校验 → 快照 → 写盘 → 热重载
-function mutateProviders(fn) {
+// 所有 provider 变更的统一通道:解析 → 变更 → 重组 TOML → 凭证校验 → 快照 → 预失效 → 写盘 → 热重载
+function mutateProviders(fn, authorizedBearerProviderIds = []) {
   loadConfig();
-  const previousProviders = (cfg.providers || []).map((provider) => ({ ...provider }));
-  const providers = (cfg.providers || []).map((p) => ({ ...p }));
+  const providers = (cfg.providers || []).map((provider) => ({ ...provider }));
   const result = fn(providers);
   const existing = fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, 'utf8') : '';
   const text = replaceProvidersRegion(existing, providers);
-  try { TOML.parse(text); } catch (e) {
-    throw new Error(`内部错误:重组后的 config 不是合法 TOML,未写入: ${e.message}`);
-  }
-  snapshotConfig();
-  fs.writeFileSync(CONFIG_PATH, text);
-  cfgMtime = 0; loadConfig();
-  const nextProviders = new Map((cfg.providers || []).map((provider) => [provider.id, provider]));
-  const previousProvidersById = new Map(previousProviders.map((provider) => [provider.id, provider]));
-  const mutatedProviderIds = new Set([...previousProvidersById.keys(), ...nextProviders.keys()]);
-  for (const providerId of [...mutatedProviderIds]) {
-    if (JSON.stringify(previousProvidersById.get(providerId)) === JSON.stringify(nextProviders.get(providerId))) {
-      mutatedProviderIds.delete(providerId);
-    }
-  }
-  bumpProviderGenerations([...mutatedProviderIds]);
-  for (const previous of previousProviders) {
-    const next = nextProviders.get(previous.id);
-    let sameConnection = false;
-    try {
-      sameConnection = Boolean(next)
-        && providerConnectionIdentity(previous) === providerConnectionIdentity(next);
-    } catch { /* Malformed or deleted providers invalidate cache fail closed. */ }
-    if (!sameConnection || next?.enabled === false) invalidateDiscoveredModels(previous.id);
-  }
+  writeConfigMutation(text, {
+    authorizedBearerProviderIds,
+    source: 'provider mutation',
+  });
   return result;
 }
 
@@ -1174,7 +1265,7 @@ async function addProvider(p) {
       if (providers.some((x) => x.id === np.id)) throw new Error(`provider '${np.id}' 已存在`);
       providers.push(np);
       return { ok: true, id: np.id };
-    });
+    }, apiKey ? [np.id] : []);
     if (apiKey) saveEnvKey(np.token_env, apiKey);
   } catch (error) {
     if (result) restoreProviderPersistenceState(state);
@@ -1220,7 +1311,7 @@ async function updateProvider(origId, p) {
       requireBearerCred(np);
       providers[i] = np;
       return { ok: true, id: np.id };
-    });
+    }, apiKey ? [np.id] : []);
     if (apiKey) saveEnvKey(np.token_env, apiKey);
     else if (p.delete_key === true && np.token_env) deleteEnvKey(np.token_env);
   } catch (error) {
@@ -1791,12 +1882,13 @@ async function handleAdmin(req, bodyBuf, res) {
   }
   if (req.method === 'POST' && p === '/__admin/config') {
     const text = bodyBuf.toString('utf8');
-    try { TOML.parse(text); } catch (e) {
-      return sendJson(res, 400, { error: 'TOML parse failed', detail: String(e.message) });
+    try {
+      // text/plain has no same-request api_key field. Credential-sensitive bearer
+      // changes therefore fail closed instead of borrowing an arbitrary process env value.
+      writeConfigMutation(text, { source: 'raw config' });
+    } catch (e) {
+      return sendJson(res, 400, { error: String(e.message) });
     }
-    snapshotConfig();
-    fs.writeFileSync(CONFIG_PATH, text);
-    cfgMtime = 0; loadConfig(); // force reload
     refreshAllCaps(true).catch((e) => console.warn(`[codex-switch] caps refresh failed: ${e.message}`));
     return sendJson(res, 200, { ok: true });
   }

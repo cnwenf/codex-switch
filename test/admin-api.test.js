@@ -107,7 +107,7 @@ async function startCodexSwitchFixture(t, { providers = [], childEnv = {}, upstr
     '',
     ...providers.map((provider) => providerBlock({
       ...provider,
-      baseUrl: provider.baseUrl || `${upstreamOrigin}/v1`,
+      baseUrl: provider.baseUrl || `${upstreamOrigin}${provider.basePath || '/v1'}`,
     })),
     '',
   ].join('\n');
@@ -145,6 +145,32 @@ async function postJson(origin, pathname, body) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
+}
+
+async function postRawConfig(origin, text) {
+  return fetch(`${origin}/__admin/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'text/plain; charset=utf-8' },
+    body: text,
+  });
+}
+
+async function waitForProviderCache(origin, providerId, expectedStatus = 'fresh', timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${origin}/__admin/providers`);
+    const payload = await response.json();
+    const provider = payload.providers.find((entry) => entry.id === providerId);
+    if (provider?.capability_cache?.status === expectedStatus) return provider;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`provider '${providerId}' cache did not become ${expectedStatus}`);
+}
+
+function finishDiscoveryResponse(response, contextWindow) {
+  if (!response || response.writableEnded) return;
+  response.writeHead(200, { 'content-type': 'application/json' });
+  response.end(JSON.stringify({ data: [{ id: 'fixture-model', context_window: contextWindow }] }));
 }
 
 async function waitUntil(predicate, message, timeoutMs = 1_000) {
@@ -427,6 +453,257 @@ test('editing the same connection cannot rebind its credential reference without
   assert.equal(providers.providers.find((provider) => provider.id === 'same-connection').token_env, 'SAME_CONNECTION_SAVED_KEY');
   assert.equal(app.upstreamRequests.some((request) => request.authorization === `Bearer ${arbitraryKey}`), false);
   assert.equal(app.output().includes(savedKey) || app.output().includes(arbitraryKey), false);
+});
+
+test('raw config cannot add a bearer provider by borrowing an existing process environment key', async (t) => {
+  const borrowedKey = 'fixture-raw-borrowed-secret';
+  const app = await startCodexSwitchFixture(t, {
+    childEnv: { RAW_BORROWED_KEY: borrowedKey },
+  });
+  const current = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const attempted = `${current.trimEnd()}\n\n${providerBlock({
+    id: 'raw-borrowed',
+    baseUrl: `${app.upstreamOrigin}/borrowed-v1`,
+    tokenEnv: 'RAW_BORROWED_KEY',
+    enabled: true,
+    providerType: 'custom',
+    models: ['fixture-model'],
+  })}\n`;
+
+  const response = await postRawConfig(app.origin, attempted);
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /raw config|API Key|bearer/i);
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  assert.equal(providers.providers.some((provider) => provider.id === 'raw-borrowed'), false);
+  assert.equal(app.upstreamRequests.some((request) => request.path.startsWith('/borrowed-v1')), false);
+  assert.equal(app.output().includes(borrowedKey), false);
+});
+
+test('raw config cannot change a bearer connection or rebind its credential reference', async (t) => {
+  const savedKey = 'fixture-raw-saved-secret';
+  const arbitraryKey = 'fixture-raw-arbitrary-secret';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'raw-existing',
+      providerType: 'custom',
+      tokenEnv: 'RAW_SAVED_KEY',
+      enabled: true,
+      models: ['fixture-model'],
+    }],
+    childEnv: {
+      RAW_SAVED_KEY: savedKey,
+      RAW_ARBITRARY_KEY: arbitraryKey,
+    },
+  });
+  await waitForProviderCache(app.origin, 'raw-existing');
+  const current = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+
+  const changedConnection = current.replaceAll(`${app.upstreamOrigin}/v1`, `${app.upstreamOrigin}/changed-v1`);
+  const connectionResponse = await postRawConfig(app.origin, changedConnection);
+  assert.equal(connectionResponse.status, 400);
+  assert.match((await connectionResponse.json()).error, /raw config|API Key|连接/i);
+
+  const reboundCredential = current.replace('token_env = "RAW_SAVED_KEY"', 'token_env = "RAW_ARBITRARY_KEY"');
+  const credentialResponse = await postRawConfig(app.origin, reboundCredential);
+  assert.equal(credentialResponse.status, 400);
+  assert.match((await credentialResponse.json()).error, /raw config|API Key|凭证/i);
+
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  const saved = providers.providers.find((provider) => provider.id === 'raw-existing');
+  assert.equal(saved.base_url, `${app.upstreamOrigin}/v1`);
+  assert.equal(saved.token_env, 'RAW_SAVED_KEY');
+  assert.equal(app.upstreamRequests.some((request) => request.path.startsWith('/changed-v1')), false);
+  assert.equal(app.upstreamRequests.some((request) => request.authorization === `Bearer ${arbitraryKey}`), false);
+  assert.equal(app.output().includes(savedKey) || app.output().includes(arbitraryKey), false);
+});
+
+test('raw provider mutation revokes an older p2 discovery before a blocking p1 refresh', async (t) => {
+  let p1Requests = 0;
+  let p2Requests = 0;
+  let blockedP1;
+  let staleP2;
+  const app = await startCodexSwitchFixture(t, {
+    providers: [
+      {
+        id: 'raw-race-p1',
+        basePath: '/p1-v1',
+        providerType: 'custom',
+        tokenEnv: 'RAW_RACE_P1_KEY',
+        enabled: true,
+        models: ['p1-model'],
+      },
+      {
+        id: 'raw-race-p2',
+        basePath: '/p2-v1',
+        providerType: 'custom',
+        tokenEnv: 'RAW_RACE_P2_KEY',
+        enabled: true,
+        models: ['fixture-model'],
+      },
+    ],
+    childEnv: {
+      RAW_RACE_P1_KEY: 'fixture-raw-race-p1-secret',
+      RAW_RACE_P2_KEY: 'fixture-raw-race-p2-secret',
+    },
+    upstreamHandler(req, res) {
+      if (req.url.startsWith('/p1-v1')) {
+        p1Requests += 1;
+        if (p1Requests >= 2) {
+          blockedP1 = res;
+          return;
+        }
+        return finishDiscoveryResponse(res, 111111);
+      }
+      if (req.url.startsWith('/p2-v1')) {
+        p2Requests += 1;
+        if (p2Requests >= 2) {
+          staleP2 = res;
+          return;
+        }
+        return finishDiscoveryResponse(res, 222222);
+      }
+      return finishDiscoveryResponse(res, 999999);
+    },
+  });
+  t.after(() => {
+    finishDiscoveryResponse(blockedP1, 111111);
+    finishDiscoveryResponse(staleP2, 303030);
+  });
+
+  await waitForProviderCache(app.origin, 'raw-race-p1');
+  await waitForProviderCache(app.origin, 'raw-race-p2');
+  const oldDiscovery = postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'raw-race-p2',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/p2-v1`,
+  });
+  await waitUntil(() => Boolean(staleP2), 'old p2 discovery did not start');
+
+  const original = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const renamed = original.replace('name = "raw-race-p2"', 'name = "raw-race-p2 changed"');
+  const configured = await postRawConfig(app.origin, renamed);
+  assert.equal(configured.status, 200);
+  await waitUntil(() => Boolean(blockedP1), 'new p1 refresh did not block');
+
+  finishDiscoveryResponse(staleP2, 303030);
+  assert.equal((await oldDiscovery).status, 200);
+  const generated = await fetch(`${app.origin}/__admin/codex-config`).then((response) => response.json());
+  const fixtureModel = JSON.parse(generated.catalog_json).models.find((model) => model.slug === 'fixture-model');
+  assert.equal(fixtureModel.context_window, 128000);
+  finishDiscoveryResponse(blockedP1, 111111);
+});
+
+test('history restore rejects a bearer connection change that has no same-request API key', async (t) => {
+  const savedKey = 'fixture-history-saved-secret';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'history-credential',
+      providerType: 'custom',
+      tokenEnv: 'HISTORY_SAVED_KEY',
+      enabled: true,
+      models: ['fixture-model'],
+    }],
+    childEnv: { HISTORY_SAVED_KEY: savedKey },
+  });
+  await waitForProviderCache(app.origin, 'history-credential');
+  const current = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const unsafeSnapshot = current.replaceAll(`${app.upstreamOrigin}/v1`, `${app.upstreamOrigin}/history-v1`);
+  const historyDir = path.join(app.home, '.codex-switch', 'history');
+  const historyFile = 'config.20260825010101.001.toml';
+  fs.mkdirSync(historyDir, { recursive: true });
+  fs.writeFileSync(path.join(historyDir, historyFile), unsafeSnapshot);
+
+  const response = await postJson(app.origin, '/__admin/history/restore', { file: historyFile });
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /history|API Key|连接|凭证/i);
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  assert.equal(providers.providers.find((provider) => provider.id === 'history-credential').base_url, `${app.upstreamOrigin}/v1`);
+  assert.equal(app.upstreamRequests.some((request) => request.path.startsWith('/history-v1')), false);
+  assert.equal(app.output().includes(savedKey), false);
+});
+
+test('history restore revokes an older p2 discovery before a blocking p1 refresh', async (t) => {
+  let p1Requests = 0;
+  let p2Requests = 0;
+  let blockedP1;
+  let staleP2;
+  const app = await startCodexSwitchFixture(t, {
+    providers: [
+      {
+        id: 'history-race-p1',
+        name: 'history-race-p1 current',
+        basePath: '/history-p1-v1',
+        providerType: 'custom',
+        tokenEnv: 'HISTORY_RACE_P1_KEY',
+        enabled: true,
+        models: ['p1-model'],
+      },
+      {
+        id: 'history-race-p2',
+        name: 'history-race-p2 current',
+        basePath: '/history-p2-v1',
+        providerType: 'custom',
+        tokenEnv: 'HISTORY_RACE_P2_KEY',
+        enabled: true,
+        models: ['fixture-model'],
+      },
+    ],
+    childEnv: {
+      HISTORY_RACE_P1_KEY: 'fixture-history-race-p1-secret',
+      HISTORY_RACE_P2_KEY: 'fixture-history-race-p2-secret',
+    },
+    upstreamHandler(req, res) {
+      if (req.url.startsWith('/history-p1-v1')) {
+        p1Requests += 1;
+        if (p1Requests >= 2) {
+          blockedP1 = res;
+          return;
+        }
+        return finishDiscoveryResponse(res, 111111);
+      }
+      if (req.url.startsWith('/history-p2-v1')) {
+        p2Requests += 1;
+        if (p2Requests >= 2) {
+          staleP2 = res;
+          return;
+        }
+        return finishDiscoveryResponse(res, 222222);
+      }
+      return finishDiscoveryResponse(res, 999999);
+    },
+  });
+  t.after(() => {
+    finishDiscoveryResponse(blockedP1, 111111);
+    finishDiscoveryResponse(staleP2, 404040);
+  });
+
+  await waitForProviderCache(app.origin, 'history-race-p1');
+  await waitForProviderCache(app.origin, 'history-race-p2');
+  const current = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  const historical = current.replace('name = "history-race-p2 current"', 'name = "history-race-p2 historical"');
+  const historyDir = path.join(app.home, '.codex-switch', 'history');
+  const historyFile = 'config.20260825020202.001.toml';
+  fs.mkdirSync(historyDir, { recursive: true });
+  fs.writeFileSync(path.join(historyDir, historyFile), historical);
+
+  const oldDiscovery = postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'history-race-p2',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/history-p2-v1`,
+  });
+  await waitUntil(() => Boolean(staleP2), 'old history p2 discovery did not start');
+  const restored = await postJson(app.origin, '/__admin/history/restore', { file: historyFile });
+  assert.equal(restored.status, 200);
+  await waitUntil(() => Boolean(blockedP1), 'history refresh p1 did not block');
+
+  finishDiscoveryResponse(staleP2, 404040);
+  assert.equal((await oldDiscovery).status, 200);
+  const generated = await fetch(`${app.origin}/__admin/codex-config`).then((response) => response.json());
+  const fixtureModel = JSON.parse(generated.catalog_json).models.find((model) => model.slug === 'fixture-model');
+  assert.equal(fixtureModel.context_window, 128000);
+  finishDiscoveryResponse(blockedP1, 111111);
 });
 
 test('an atomic provider and key save rolls config back when credential persistence fails', async (t) => {
