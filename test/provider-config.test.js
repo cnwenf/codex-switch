@@ -42,6 +42,25 @@ test('provider type and options round-trip through TOML', () => {
   assert.equal(parsed.base_url, 'https://bedrock-mantle.us-east-1.api.aws/v1');
 });
 
+test('token_env is canonical at the normalization boundary', () => {
+  const base = {
+    id: 'canonical-token-env',
+    provider_type: 'custom',
+    provider_options: { base_url: 'https://example.invalid/v1' },
+    base_url: 'https://example.invalid/v1',
+    auth: 'bearer',
+    models: ['fixture-model'],
+  };
+
+  assert.equal(normalizeProvider({ ...base, token_env: 'REVIEW_KEY' }).token_env, 'REVIEW_KEY');
+  for (const tokenEnv of [' REVIEW_KEY ', 'REVIEW-KEY', '9REVIEW_KEY', 'REVIEW.KEY', 'REVIEW KEY']) {
+    assert.throws(
+      () => normalizeProvider({ ...base, token_env: tokenEnv }),
+      /token_env|环境变量名/,
+    );
+  }
+});
+
 test('connection identity covers authoritative options without credential material', () => {
   const beijing = normalizeProvider({
     id: 'bailian-a',

@@ -136,7 +136,7 @@ async function startCodexSwitchFixture(t, { providers = [], childEnv = {}, upstr
 
   const origin = `http://127.0.0.1:${port}`;
   await waitForHealth(origin, child);
-  return { origin, upstreamOrigin, upstreamRequests, home, output: () => output };
+  return { origin, upstreamOrigin, upstreamRequests, home, configPath, output: () => output };
 }
 
 async function postJson(origin, pathname, body) {
@@ -455,6 +455,54 @@ test('editing the same connection cannot rebind its credential reference without
   assert.equal(app.output().includes(savedKey) || app.output().includes(arbitraryKey), false);
 });
 
+test('CRUD, raw config, and history reject non-canonical token_env names', async (t) => {
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'canonical-env',
+      providerType: 'custom',
+      tokenEnv: 'REVIEW_KEY',
+      enabled: true,
+      models: ['fixture-model'],
+    }],
+    childEnv: { REVIEW_KEY: 'fixture-canonical-env-secret' },
+  });
+  const current = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+
+  const edited = await postJson(app.origin, '/__admin/providers/update', {
+    origId: 'canonical-env',
+    provider: {
+      id: 'canonical-env',
+      provider_type: 'custom',
+      provider_options: { base_url: `${app.upstreamOrigin}/v1` },
+      base_url: `${app.upstreamOrigin}/v1`,
+      auth: 'bearer',
+      token_env: ' REVIEW_KEY ',
+      models: ['fixture-model'],
+      enabled: true,
+    },
+  });
+  assert.equal(edited.status, 400);
+  assert.match((await edited.json()).error, /token_env|环境变量名/);
+
+  const malformed = current.replace('token_env = "REVIEW_KEY"', 'token_env = " REVIEW_KEY "');
+  const raw = await postRawConfig(app.origin, malformed);
+  assert.equal(raw.status, 400);
+  assert.match((await raw.json()).error, /token_env|环境变量名/);
+
+  const historyDir = path.join(app.home, '.codex-switch', 'history');
+  const historyFile = 'config.20260825030303.001.toml';
+  fs.mkdirSync(historyDir, { recursive: true });
+  fs.writeFileSync(path.join(historyDir, historyFile), malformed);
+  const restored = await postJson(app.origin, '/__admin/history/restore', { file: historyFile });
+  assert.equal(restored.status, 400);
+  assert.match((await restored.json()).error, /token_env|环境变量名/);
+
+  const after = await fetch(`${app.origin}/__admin/config`).then((response) => response.text());
+  assert.equal(after, current);
+  assert.equal(app.upstreamRequests.some((request) => request.authorization === 'Bearer undefined'), false);
+  assert.equal(app.output().includes('fixture-canonical-env-secret'), false);
+});
+
 test('raw config cannot add a bearer provider by borrowing an existing process environment key', async (t) => {
   const borrowedKey = 'fixture-raw-borrowed-secret';
   const app = await startCodexSwitchFixture(t, {
@@ -594,6 +642,84 @@ test('raw provider mutation revokes an older p2 discovery before a blocking p1 r
   finishDiscoveryResponse(blockedP1, 111111);
 });
 
+test('a provider mutation cancels an older refresh-all batch before its next provider starts', async (t) => {
+  const oldP2Key = 'fixture-old-batch-p2-secret';
+  const newP2Key = 'fixture-new-batch-p2-secret';
+  let p1Requests = 0;
+  let blockedP1;
+  const app = await startCodexSwitchFixture(t, {
+    providers: [
+      {
+        id: 'batch-p1',
+        basePath: '/batch-p1-v1',
+        providerType: 'custom',
+        tokenEnv: 'BATCH_P1_KEY',
+        enabled: true,
+        models: ['p1-model'],
+      },
+      {
+        id: 'batch-p2',
+        basePath: '/batch-p2-v1',
+        providerType: 'custom',
+        tokenEnv: 'BATCH_P2_OLD_KEY',
+        enabled: true,
+        models: ['fixture-model'],
+      },
+    ],
+    childEnv: {
+      BATCH_P1_KEY: 'fixture-batch-p1-secret',
+      BATCH_P2_OLD_KEY: oldP2Key,
+    },
+    upstreamHandler(req, res) {
+      if (req.url.startsWith('/batch-p1-v1')) {
+        p1Requests += 1;
+        if (p1Requests >= 2) {
+          blockedP1 = res;
+          return;
+        }
+      }
+      return finishDiscoveryResponse(res, 111111);
+    },
+  });
+  t.after(() => finishDiscoveryResponse(blockedP1, 111111));
+
+  await waitForProviderCache(app.origin, 'batch-p1');
+  await waitForProviderCache(app.origin, 'batch-p2');
+  const oldP2RequestsBefore = app.upstreamRequests.filter(
+    (request) => request.path.startsWith('/batch-p2-v1') && request.authorization === `Bearer ${oldP2Key}`,
+  ).length;
+
+  const staleBatch = postJson(app.origin, '/__admin/fetch-capabilities', {});
+  await waitUntil(() => Boolean(blockedP1), 'old refresh-all p1 did not block');
+  const updated = await postJson(app.origin, '/__admin/providers/update', {
+    origId: 'batch-p2',
+    provider: {
+      id: 'batch-p2',
+      provider_type: 'custom',
+      provider_options: { base_url: `${app.upstreamOrigin}/batch-p2-v1` },
+      base_url: `${app.upstreamOrigin}/batch-p2-v1`,
+      auth: 'bearer',
+      token_env: 'BATCH_P2_NEW_KEY',
+      api_key: newP2Key,
+      models: ['fixture-model'],
+      enabled: true,
+    },
+  });
+  assert.equal(updated.status, 200);
+  finishDiscoveryResponse(blockedP1, 111111);
+  const staleResult = await staleBatch;
+  assert.equal(staleResult.status, 200);
+
+  const oldP2RequestsAfter = app.upstreamRequests.filter(
+    (request) => request.path.startsWith('/batch-p2-v1') && request.authorization === `Bearer ${oldP2Key}`,
+  ).length;
+  assert.equal(oldP2RequestsAfter, oldP2RequestsBefore);
+  assert.equal(app.upstreamRequests.some(
+    (request) => request.path.startsWith('/batch-p2-v1') && request.authorization === `Bearer ${newP2Key}`,
+  ), true);
+  assert.equal(app.output().includes(oldP2Key) || app.output().includes(newP2Key), false);
+});
+
 test('history restore rejects a bearer connection change that has no same-request API key', async (t) => {
   const savedKey = 'fixture-history-saved-secret';
   const app = await startCodexSwitchFixture(t, {
@@ -731,6 +857,106 @@ test('an atomic provider and key save rolls config back when credential persiste
   assert.equal(providers.providers.some((provider) => provider.id === 'rollback-custom'), false);
   assert.equal(app.upstreamRequests.length, 0);
   assert.equal(app.output().includes(key), false);
+});
+
+test('raw config load failure rolls back config, process routing, and cache metadata', async (t) => {
+  const key = 'fixture-load-rollback-secret';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'load-rollback',
+      providerType: 'custom',
+      tokenEnv: 'LOAD_ROLLBACK_KEY',
+      enabled: true,
+      models: ['fixture-model'],
+    }],
+    childEnv: { LOAD_ROLLBACK_KEY: key },
+    upstreamHandler(req, res) {
+      return finishDiscoveryResponse(res, 515151);
+    },
+  });
+  await waitForProviderCache(app.origin, 'load-rollback');
+  const beforeText = fs.readFileSync(app.configPath, 'utf8');
+  const beforeProviders = await fetch(`${app.origin}/__admin/providers`).then((response) => response.json());
+  const beforeCache = beforeProviders.providers.find((provider) => provider.id === 'load-rollback').capability_cache;
+  const invalidRuntime = beforeText.replace('models = ["fixture-model"]', 'models = { invalid = true }');
+
+  const response = await postRawConfig(app.origin, invalidRuntime);
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /iterable|models|load|配置/i);
+  assert.equal(fs.readFileSync(app.configPath, 'utf8'), beforeText);
+  const afterProviders = await fetch(`${app.origin}/__admin/providers`).then((res) => res.json());
+  assert.deepEqual(
+    afterProviders.providers.find((provider) => provider.id === 'load-rollback').capability_cache,
+    beforeCache,
+  );
+  const discovery = await postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'load-rollback',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/v1`,
+  });
+  assert.equal((await discovery.json()).validation.status, 'valid');
+  assert.equal(app.upstreamRequests.at(-1).authorization, `Bearer ${key}`);
+  assert.equal(app.output().includes(key), false);
+});
+
+test('failed credential persistence restores the pre-mutation generation and refresh lease', async (t) => {
+  const oldKey = 'fixture-lease-rollback-old-secret';
+  const newKey = 'fixture-lease-rollback-new-secret';
+  let requests = 0;
+  let delayedResponse;
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'lease-rollback',
+      providerType: 'custom',
+      tokenEnv: 'LEASE_ROLLBACK_KEY',
+      enabled: true,
+      models: ['fixture-model'],
+    }],
+    childEnv: { LEASE_ROLLBACK_KEY: oldKey },
+    upstreamHandler(req, res) {
+      requests += 1;
+      if (requests >= 2 && req.url.startsWith('/v1')) {
+        delayedResponse = res;
+        return;
+      }
+      return finishDiscoveryResponse(res, 111111);
+    },
+  });
+  t.after(() => finishDiscoveryResponse(delayedResponse, 333333));
+  await waitForProviderCache(app.origin, 'lease-rollback');
+
+  const inFlight = postJson(app.origin, '/__admin/provider-discover', {
+    provider_id: 'lease-rollback',
+    provider_type: 'custom',
+    base_url: `${app.upstreamOrigin}/v1`,
+  });
+  await waitUntil(() => Boolean(delayedResponse), 'pre-mutation discovery did not block');
+  fs.mkdirSync(path.join(app.home, '.codex-switch', 'env.tmp'), { recursive: true });
+  const failed = await postJson(app.origin, '/__admin/providers/update', {
+    origId: 'lease-rollback',
+    provider: {
+      id: 'lease-rollback',
+      provider_type: 'custom',
+      provider_options: { base_url: `${app.upstreamOrigin}/changed-v1` },
+      base_url: `${app.upstreamOrigin}/changed-v1`,
+      auth: 'bearer',
+      token_env: 'LEASE_ROLLBACK_KEY',
+      api_key: newKey,
+      models: ['fixture-model'],
+      enabled: true,
+    },
+  });
+  assert.equal(failed.status, 400);
+
+  finishDiscoveryResponse(delayedResponse, 333333);
+  assert.equal((await inFlight).status, 200);
+  const generated = await fetch(`${app.origin}/__admin/codex-config`).then((response) => response.json());
+  assert.equal(JSON.parse(generated.catalog_json).models.find((model) => model.slug === 'fixture-model').context_window, 333333);
+  const providers = await fetch(`${app.origin}/__admin/providers`).then((response) => response.json());
+  assert.equal(providers.providers.find((provider) => provider.id === 'lease-rollback').base_url, `${app.upstreamOrigin}/v1`);
+  assert.equal(app.upstreamRequests.some((request) => request.authorization === `Bearer ${newKey}`), false);
+  assert.equal(app.output().includes(oldKey) || app.output().includes(newKey), false);
 });
 
 test('failed provider and key rotation restores config, env, process key, and cached metadata', async (t) => {

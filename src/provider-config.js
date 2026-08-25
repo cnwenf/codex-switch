@@ -4,6 +4,8 @@ import {
   resolveProviderConnection,
 } from './provider-registry.js';
 
+export const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 function tomlStr(value) {
   return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
@@ -133,6 +135,16 @@ export function normalizeProvider(input) {
     throw new Error(`未知 auth 类型 '${auth}'`);
   }
 
+  let tokenEnv = '';
+  if (provider.token_env !== undefined && provider.token_env !== null && provider.token_env !== '') {
+    if (typeof provider.token_env !== 'string'
+      || provider.token_env !== provider.token_env.trim()
+      || !ENV_NAME_RE.test(provider.token_env)) {
+      throw new Error('token_env 必须是无前后空白的合法环境变量名');
+    }
+    tokenEnv = provider.token_env;
+  }
+
   const explicitType = String(provider.provider_type || '').trim();
   const providerType = explicitType || inferProviderType(provider.base_url);
   const preset = getProviderPreset(providerType);
@@ -160,9 +172,7 @@ export function normalizeProvider(input) {
     auth,
   };
   if (auth === 'bearer' || auth === 'chatgpt_oauth') {
-    if (provider.token_env && String(provider.token_env).trim()) {
-      normalized.token_env = String(provider.token_env).trim();
-    }
+    if (tokenEnv) normalized.token_env = tokenEnv;
     if (provider.token && String(provider.token).trim()) normalized.token = String(provider.token).trim();
   }
   normalized.models = models;
