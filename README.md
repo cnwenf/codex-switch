@@ -1,81 +1,93 @@
 # codex-switch
 
-为 Codex 提供多模型路由的**极薄本地代理**:一个 Codex provider → N 个上游 provider。
+为 Codex 提供多模型路由的极薄本地代理：一个 Codex provider 连接多个上游 provider。
 
-核心承诺:
+核心承诺：
 
-- **零改写**:只读请求体里的 `model` 字段做路由,请求/响应字节级原样转发(流式 SSE 也是透传)。
-- **纯配置**:路由全部来自 `config.toml`,一个 provider 可挂多个模型,无数据库、无状态。
-- **自带 HTML 配置页**:页面上改配置、查模型能力,**一键写入 Codex 侧配置**(改动前自动备份,支持一键还原),重启 Codex 即用。
+- **零 body 改写**：只读取请求体里的 `model` 字段做路由；请求体、响应体和 SSE 均按字节透传。
+- **Responses 边界清楚**：只有已确认存在 OpenAI Responses 接口的厂商才能保存为直连路由；仅兼容 Chat Completions 的厂商不会伪装成可用。
+- **纯配置**：路由来自 `config.toml`，无数据库；厂商连接信息热加载，模型目录更新后重启 Codex 生效。
+- **本地管理页**：可搜索厂商、检测 Key、发现并筛选模型、查看能力来源、备份/还原配置，并把模型目录应用到 Codex。
 
 详细设计见 [DESIGN.md](DESIGN.md)。
 
-## 效果
+## 全新安装的默认状态
 
-Codex 的模型选择器里,**官方订阅模型**(ChatGPT 订阅)与**自有供应商模型**(阿里云百炼等)同列展示,随手切换:
+全新安装只有 ChatGPT 订阅 provider，不再默认内置阿里云百炼或任何第三方 API provider。升级不会删除用户已有的百炼或其他 provider 配置。
 
-![Codex 模型选择器:ChatGPT 订阅模型与阿里云百炼模型同列,一屏切换](assets/screenshot-model-picker.png)
+Codex 的模型选择器会把启用 provider 的模型合并展示。选中模型后，codex-switch 按原始 model ID 选择上游：ChatGPT 订阅沿用 Codex OAuth，第三方 API 替换为对应 Bearer 凭证；除认证 header 外不改写请求或响应。
 
-选中哪个模型,codex-switch 就把该请求原样路由到对应上游——官方模型走 Codex OAuth 透传,自有模型注入 Bearer 认证;除认证头外,请求/响应一律字节级不改写。
+![Codex 模型选择器中的订阅与第三方模型](assets/screenshot-model-picker.png)
+
+## 厂商目录与 Responses 兼容性
+
+添加供应商时可以按中英文名称或 ID 搜索。状态描述的是 Codex 实际使用的 Responses 协议兼容性，不等同于“有 OpenAI SDK”或“能调用 `/chat/completions`”。
+
+| 厂商 | Responses 状态 | 连接与模型发现 |
+|---|---|---|
+| OpenAI API | supported | 固定 URL；`GET /models`，合并静态能力 |
+| xAI | supported | 固定 URL；Key 检测与 language-models 发现 |
+| OpenRouter | supported | 固定 URL；检测 Key，优先发现当前 Key 可用模型 |
+| Groq | beta | 固定 URL；Responses Beta；`GET /models` |
+| Fireworks AI | supported | 固定 URL；`GET /models`，合并静态能力 |
+| 百度千帆 | supported | 固定 URL；`GET /models` |
+| 火山方舟 | supported | 不执行可能计费的探测；显示静态参考模型，必须手工填写 Endpoint ID |
+| 腾讯 TokenHub | limited | 中国站/国际站动态 URL；只保留 Responses 协议矩阵中的在线模型 |
+| 阿里云百炼 | limited | 按 region/workspace 动态 URL；原生分页模型发现，部分 Responses 参数有限制 |
+| AWS Bedrock | supported | 按 region 动态 URL；`GET /models` |
+| Azure OpenAI / Microsoft Foundry | supported | 按 resource endpoint 动态 URL；必须手工填写 Deployment ID |
+| Cloudflare Workers AI | limited | 按 account ID 动态 URL；使用官方静态 Responses 模型白名单，不探测 Token |
+| NVIDIA NIM（自托管） | limited | 用户提供部署 URL；Responses 能力取决于 NIM 版本和模型 |
+| Custom | limited | 用户提供 URL；尝试 `GET /models`，成功发现模型也不等于已证明 Responses 兼容 |
+
+以下热门厂商仍可搜索，但当前官方直连 API 未确认支持 Codex 所需的 Responses 协议，因此不能直接保存：Kimi、GLM、DeepSeek、Google Gemini、Anthropic Claude、Mistral AI、Together AI、Cerebras、硅基流动。
+
+如果目标模型在 OpenRouter 可用，可以在“不支持直连”的说明里点“改用 OpenRouter”，再用 OpenRouter Key 搜索该模型。也可以选择 Custom 连接用户自己已经验证过的 Responses 网关；codex-switch 不提供 Responses 到 Chat Completions 的协议转换。
+
+## 添加供应商
+
+打开 `http://127.0.0.1:8787/`，点“添加供应商”：
+
+1. 搜索并选择厂商，先阅读 supported / beta / limited / unsupported 兼容状态。
+2. 填写厂商连接字段。固定和动态 URL 都由本地服务端重新计算；只有 Custom 和自托管 NIM 可填写 URL。
+3. 输入 API Key。停顿 700 ms 会自动检测，离开输入框会立即检测，也可以手工重试。
+4. 搜索发现结果并多选模型；没有发现接口时可以手工添加 model ID。
+5. 火山方舟必须填写实际 Endpoint ID，Azure 必须填写实际 Deployment ID；页面里的底座模型只是参考，不能当作路由 ID 保存。
+6. 保存后，到“配置历史”点“应用并备份”，再重启 Codex 让新的模型目录生效。
+
+Key/连接检测不是简单布尔值，页面会区分：`valid`、`invalid`、`forbidden`、`rate_limited`、`unreachable`、`unsupported` 和 `unverified`。静态目录、手工 deployment，以及无法执行无费用验证的厂商会明确显示为未验证；首次真实 Codex 请求仍是最终可用性依据。
+
+模型能力用 ✓ / × / ? 三态表示 `true` / `false` / `unknown`，不会把厂商没返回的字段误判为不支持。能力还会标注 API、静态、未知、手动或参考来源。生成 Codex catalog 时的优先级是：`config.toml` 手工覆盖 > provider 发现缓存 > 内置静态表 > 保守默认。
 
 ## 安装
 
-两种方式,任选其一。
+### macOS App（DMG）
 
-### 方式一:macOS App(DMG,推荐)
+适用于 Apple Silicon（arm64）Mac，无需预装 Node 或 git。`latest` 始终指向 GitHub 上已经发布且带 DMG 资产的版本；本 README 的源码版本号不代表对应 Release 资产已经发布。
 
-适用于 Apple Silicon(arm64)的 Mac。无需 Node、无需 git,下载即用,自带开机自启。
-
-#### A)一键脚本安装(推荐,免 Gatekeeper)
+一键安装：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cnwenf/codex-switch/main/scripts/install-app.sh | sh
 ```
 
-脚本自动从 Releases 下载最新 DMG 并安装到 `/Applications`,随后启动。
-**首次打开不会弹 Gatekeeper**:macOS 的隔离属性(`com.apple.quarantine`)只会由浏览器 / 邮件 /
-AirDrop 等「带隔离意识」的下载器打上,`curl` 下载不打。
+也可以从 [Releases](https://github.com/cnwenf/codex-switch/releases/latest) 手工下载 `CodexSwitch-<版本>-macos-arm64.dmg`，或用本地 DMG 安装：
 
-> **DNS 受限 / 直连超时**时,改用固定 IP 版:
->
-> ```sh
-> curl -fsSL --resolve raw.githubusercontent.com:443:185.199.108.133 https://raw.githubusercontent.com/cnwenf/codex-switch/main/scripts/install-app.sh | sh
-> ```
->
-> 也可先克隆本仓库再执行 `sh scripts/install-app.sh`,或手动下载 DMG 后执行
-> `sh scripts/install-app.sh /path/to/xxx.dmg`(离线安装/指定版本)。
-
-#### B)手动 DMG 安装
-
-**1)下载** — 从 [Releases](https://github.com/cnwenf/codex-switch/releases/latest) 下载最新的
-`CodexSwitch-<版本>-macos-arm64.dmg`(约 40 MB)。
-
-**2)安装** — 双击挂载 `.dmg`,把 **Codex Switch** 图标拖进旁边的 `Applications` 文件夹即可。
-
-**3)首次打开** — App 采用本地 ad-hoc 签名,且**经浏览器下载**会附带系统隔离属性,首次启动可能被
-Gatekeeper 拦截。二选一:
-
-- 在「应用程序」里 **右键(或 ⌃ 点按)Codex Switch → 打开**,在弹窗中再点一次「打开」;或
-- 在终端执行一次:
-
-  ```sh
-  xattr -cr "/Applications/Codex Switch.app"
-  ```
-
-(仅浏览器下载安装需要此步;用上面方式 A 脚本安装的直接打开即可。)
-
-**4)使用** — 启动后服务常驻后台,并默认随**开机 / 登录自动启动**(macOS LaunchAgent)。macOS 右上角菜单栏会出现一个小图标,点按即可查看运行状态(版本 · 供应商数 · 模型数)、打开配置页、检查更新。浏览器打开配置页:
-
-```
-http://127.0.0.1:8787/
+```sh
+sh scripts/install-app.sh /path/to/CodexSwitch.dmg
 ```
 
-在页面配置供应商(名称 / URL / API-Key / 模型列表,API Key 直接填写、服务端安全存储)→ 保存 →
-切到「配置历史」,在「Codex 注入配置」卡片点「**应用并备份**」→ 重启 Codex,完事。
+浏览器下载的 ad-hoc 签名 App 可能带 macOS 隔离属性。首次打开可在 Finder 中右键“打开”，或执行：
 
-### 方式二:源码一键安装
+```sh
+xattr -cr "/Applications/Codex Switch.app"
+```
 
-适合想看源码、自行改造,或需要随系统服务方式部署的场景。
+App 默认用 macOS LaunchAgent 在登录时启动，菜单栏可查看状态、打开配置页、检查更新或退出。退出 App 会剥离 codex-switch 注入的 Codex 配置，保留 Codex 自己的其他设置。
+
+### 源码安装
+
+需要 Node.js 20+：
 
 ```sh
 git clone https://github.com/cnwenf/codex-switch.git
@@ -83,75 +95,58 @@ cd codex-switch
 ./install.sh
 ```
 
-`install.sh` 会:安装依赖 → 启动服务 → 在终端打印配置页链接:
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  打开配置页面(浏览器):  http://127.0.0.1:8787/
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-打开页面 → 配置供应商(API Key 直接填写)→ 保存 → 「配置历史」里点「应用并备份」→ 重启 Codex,完事。
-
-## 日常使用
-
-配置页 `http://127.0.0.1:8787/` 是统一入口:增删供应商、填 API Key、看模型能力、开关开机自启、
-「应用并备份」/「一键还原」、检查更新都在页面上完成。页头右上角显示当前版本,有新版本时会出现「更新」按钮
-(App 方式:自动下载新 DMG 安装并重启;源码方式:校验工作区干净后 `git pull` 并自动重启)。
-
-**App(DMG)方式** —— 服务由 macOS LaunchAgent 托管:
-
-- 开机 / 登录自动启动(默认开启),配置页「配置历史」里可随时勾选开关(取消勾选会移除登录项);
-- 停掉当前服务:`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.cnwenf.codex-switch.plist`;
-- 再次手动启动:直接打开「Codex Switch」App 即可;
-- 菜单栏小图标:App 运行时右上角图标常亮,服务未运行时变暗;点按可看状态、打开配置页、检查更新或隐藏图标(重启 App 会再次出现)。
-- 退出即还原:菜单栏菜单里的「退出 Codex Switch(自动还原配置)」或从 Dock / ⌘Tab 退出 App,
-  都会先把本应用注入的 Codex 代理配置自动还原回官方默认(再退出进程),Codex 随即直连官方;
-  还原是手术式的——只剥离本应用注入的行/段,官方 codex CLI 后续写入的内容(如 [projects])原样保留;
-  需要再次走代理时:重新打开 App → 配置页「配置历史」→「应用并备份」。
-- 升级(三选一):① 配置页右上角版本旁点「**更新**」——自动下载新版 DMG、安装并重启,带下载进度条;
-  ② 重跑一键安装脚本(自动取最新 Release);③ 下载新 DMG → 拖到「应用程序」覆盖 → 重新打开 App。
-
-**源码方式** —— 常用命令:
+常用命令：
 
 | 命令 | 作用 |
 |---|---|
-| `./install.sh` | 升级/重启(幂等,已装过的重新跑即可) |
-| `npm start` / `npm stop` / `npm status` | 启动 / 停止 / 状态 |
-| `open http://127.0.0.1:8787/` | 配置页 |
+| `./install.sh` | 安装依赖并启动/升级服务 |
+| `npm start` | 启动服务 |
+| `npm stop` | 停止服务 |
+| `npm status` | 查看状态 |
+| `open http://127.0.0.1:8787/` | 打开配置页 |
 
-## 安全说明(请读)
+## 管理页
 
-- **本地服务**:只监听 `127.0.0.1`,不对外网开放;无遥测、无日志上传。更新仅由用户在配置页**主动点击**发起:
-  App 方式只从本仓库的 GitHub Releases 下载官方 DMG;源码方式先校验工作区无未提交改动、只允许快进合并。
-- **不改写请求**:除按 provider 配置注入/剥离认证头外,任何请求体、路径、参数、响应一律原样转发。
-- **凭证不落配置**:proxy 自己的 `config.toml` 不放任何明文密钥。上游 API key 统一存 `~/.codex-switch/env`(chmod 600,已 gitignore 不进仓库,值绝不回传前端)——正常在供应商模态框的「API-Key」栏直接填写即可;如需手工维护:
+v0.5.0 的管理页采用浅色冷灰画布、不透明表面和单一蓝色主色，供应商以记录列表展示；移动端的编辑界面是带固定头尾操作区的全屏 sheet。厂商和模型都是可搜索、可键盘操作的 combobox，状态同时使用文字和图标，不只依赖颜色。
 
-  ```sh
-  printf 'DASHSCOPE_API_KEY=sk-xxx\n' >> ~/.codex-switch/env && chmod 600 ~/.codex-switch/env
-  ```
+页面保留供应商 CRUD/启停/复制、配置历史与还原、Codex 应用与还原、开机自启、更新检查、模型发现和能力刷新。视觉重设计没有改变这些 API、payload、路由规则或保存动作。
 
-- **官方订阅只读**:Codex 的 `~/.codex/auth.json`、`~/.codex/config.toml` 永远只读合并——「应用」只会手术式插入 `codex-switch` 自己的两段配置,**官方模型列表与其余配置绝对不覆盖**,且每次应用前自动备份,页面上一键还原。
+## 安全边界
 
-## 工作原理(一张图)
+- 服务只监听 `127.0.0.1`，不对公网开放；无遥测、无日志上传。
+- 固定和动态厂商 URL 由服务端 registry 重新解析，浏览器提交的派生 URL 不是权威值。
+- Custom 和 NIM 只允许 HTTPS，或 loopback HTTP；发现请求限制同源跳转并阻止公网/loopback 目标类别切换，降低 SSRF 与凭证转发风险。
+- 每个发现请求 10 秒超时，响应最多 4 MiB，最多 3 次同源跳转、5 页和 2,000 个模型；上游正文、堆栈和包含 Key 的模型字段不会返回。
+- API Key 只通过本机 POST body 参与检测，不进入 URL 或日志。保存后的 Key 位于 `~/.codex-switch/env`（mode `0600`），`config.toml` 只保存环境变量名。
+- 正常列表、编辑和检测遵守“Key 不回显”：不会回填已保存值。现有“复制为 JSON”是明确的敏感导出操作，可能把 Key 写入剪贴板；页面会标注“含 API Key，勿外传”。
+- Codex 的 `~/.codex/auth.json` 和 `~/.codex/config.toml` 只读或手术式合并；应用前自动备份，可一键还原，不覆盖无关配置。
 
-```
+## 工作原理
+
+```text
 Codex  ──▶  http://127.0.0.1:8787/v1  ──▶  codex-switch
-                (唯一的 model_provider)          │  读 body.model 查路由表
-                                                 ├─▶ gpt-5.6 ──▶ chatgpt.com(Codex OAuth 原样转发)
-                                                 └─▶ qwen3.8-max ──▶ 阿里云百炼(Bearer 注入)
+                唯一 model_provider          │  读 body.model 查路由表
+                                              ├─▶ 订阅模型 ──▶ ChatGPT（OAuth 透传）
+                                              └─▶ 第三方模型 ──▶ Responses API（Bearer 替换）
 ```
 
-Codex 侧只需两行配置(配置页「应用并备份」自动写入 `~/.codex/`):
+Codex 侧配置由管理页“应用并备份”生成，核心形态是：
 
 ```toml
 model_catalog_json = "~/.codex/catalog.json"
+
 [model_providers.codexswitch]
 name = "codex-switch"
 base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
 requires_openai_auth = true
 ```
+
+模型 ID 必须和上游路由 ID 完全一致，因为代理不会改写 body 里的 `model`。
+
+## 验证边界
+
+仓库自动化测试使用本地 stub server 覆盖 registry、adapter、Key 脱敏、SSRF/跳转、分页/大小限制、TOML 持久化、管理 API 和 UI 交互。是否用真实厂商 Key 做过 live 验证必须在具体发布验收中单独报告；文档或 stub 测试通过不代表已经完成 live-key 验证。
 
 ## 许可
 
