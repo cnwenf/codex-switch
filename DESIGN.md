@@ -162,7 +162,7 @@ adapter table 隔离异构 API：
 - Ark/Azure 必须选择用户手工输入的 Endpoint/Deployment ID；静态参考模型不可选择成路由。
 - Custom、静态目录和已有 provider 可在明确的 unverified 状态下保存；UI 会说明首次调用为准。
 
-已有 Key 只在编辑同一已保存 provider、`provider_type` 和 `token_env` 均匹配时由本地后端使用。发现缓存也只写入同 ID、同类型且仍启用的 provider，避免跨 provider 或未保存表单污染 catalog。
+已有 Key 只在编辑同一已保存 provider，且服务端规范化后的完整连接身份（`provider_type`、authoritative `base_url`、`provider_options`）逐字节一致时由本地后端使用。Custom/NIM URL 或任一安全关键连接选项变化时，保存请求必须原子携带新 Key；拒绝时保留原配置和凭证。发现缓存也只写入同 ID、同连接身份且仍启用的 provider，避免跨 provider、ID 复用或未保存表单污染 catalog。
 
 ## 10. 能力规范化与缓存优先级
 
@@ -192,7 +192,7 @@ adapter table 隔离异构 API：
 3. 内置静态表；
 4. 保守默认（128K、无视觉、不声明 reasoning effort）。
 
-缓存以 provider ID 保存发现时间和模型能力。发现的 unknown image 不覆盖静态值，明确 false 可以覆盖；明确 reasoning false 会清空静态 reasoning levels。能力只改变 `catalog.json`，不改变路由请求。
+缓存以 provider ID 索引，但每条记录同时绑定不含 Key/token 的完整规范化连接身份和 30 分钟 TTL。provider 删除、停用或连接身份变化会立即失效；`resolveCaps` 在读取时再次核对 TTL 与连接身份，过期、ID 复用或不匹配均 fail closed 到静态/默认能力。发现的 unknown image 不覆盖静态值，明确 false 可以覆盖；明确 reasoning false 会清空静态 reasoning levels。能力只改变 `catalog.json`，不改变路由请求。
 
 ## 11. 安全限制
 
@@ -244,4 +244,4 @@ Node 内置 test runner 和本地 stub HTTP server 覆盖 registry、URL 派生�
 
 自动化/stub 证据、官方文档兼容性证据和真实厂商 Key live 验证必须分开报告。没有本机可用 Key 时，只能声称确定性 adapter 测试和文档边界通过，不能声称厂商账号、权限、region 或 endpoint 已 live 验证。
 
-同样，`package.json` 版本、README 或设计文档更新不代表 GitHub Release workflow、DMG asset、checksum 或一键安装 E2E 已完成。Release publication 与 asset upload 存在异步窗口；精确 tag 的有界轮询、checksum 校验和 pending-asset 路径属于 Task 9，尚待实现和独立验收。
+Task 9 已实现并通过本地自动化验收：GitHub Actions 从精确 release tag 构建 arm64 DMG 和 `.sha256`，发布前校验版本、架构、签名、DMG 与 checksum；安装器对同一精确 tag 执行有界轮询、严格资产元数据匹配和 checksum 校验。它不等于线上 Release 已发布：真实 Actions run、GitHub 资产回读和 latest 一键安装属于 Task 10，必须在发布后单独验收。

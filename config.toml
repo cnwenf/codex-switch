@@ -1,5 +1,5 @@
 # codex-switch 默认配置
-# 无明文 secret:DASHSCOPE 走环境变量(下方 token_env);订阅 token 走 ~/.codex/auth.json(只读)。
+# 默认不内置第三方 API Key；新增供应商的 Key 由管理页写入 ~/.codex-switch/env，订阅 token 只读 ~/.codex/auth.json。
 
 [proxy]
 listen = "127.0.0.1:8787"
