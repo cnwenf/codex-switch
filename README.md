@@ -4,7 +4,7 @@
 
 核心承诺：
 
-- **零 body 改写**：只读取请求体里的 `model` 字段做路由；请求体、响应体和 SSE 均按字节透传。
+- **不改应用层 payload**：只读取请求 JSON 里的 `model` 字段做路由，不改写应用层 JSON 或 SSE event/data；正常 HTTP 代理仍会处理 hop-by-hop、认证和传输编码相关 header。
 - **Responses 边界清楚**：只有已确认存在 OpenAI Responses 接口的厂商才能保存为直连路由；仅兼容 Chat Completions 的厂商不会伪装成可用。
 - **纯配置**：路由来自 `config.toml`，无数据库；厂商连接信息热加载，模型目录更新后重启 Codex 生效。
 - **本地管理页**：可搜索厂商、检测 Key、发现并筛选模型、查看能力来源、备份/还原配置，并把模型目录应用到 Codex。
@@ -15,7 +15,7 @@
 
 全新安装只有 ChatGPT 订阅 provider，不再默认内置阿里云百炼或任何第三方 API provider。升级不会删除用户已有的百炼或其他 provider 配置。
 
-Codex 的模型选择器会把启用 provider 的模型合并展示。选中模型后，codex-switch 按原始 model ID 选择上游：ChatGPT 订阅沿用 Codex OAuth，第三方 API 替换为对应 Bearer 凭证；除认证 header 外不改写请求或响应。
+Codex 的模型选择器会把启用 provider 的模型合并展示。选中模型后，codex-switch 按原始 model ID 选择上游：ChatGPT 订阅沿用 Codex OAuth，第三方 API 替换为对应 Bearer 凭证；应用层 JSON 和 SSE payload 不改写。作为正常 HTTP 代理，它会剥离 hop-by-hop header、替换认证，并在 `fetch` 可能解压响应后移除不再准确的 `content-length` / `content-encoding`。
 
 ![Codex 模型选择器中的订阅与第三方模型](assets/screenshot-model-picker.png)
 
@@ -63,7 +63,7 @@ Key/连接检测不是简单布尔值，页面会区分：`valid`、`invalid`、
 
 ### macOS App（DMG）
 
-适用于 Apple Silicon（arm64）Mac，无需预装 Node 或 git。`latest` 始终指向 GitHub 上已经发布且带 DMG 资产的版本；本 README 的源码版本号不代表对应 Release 资产已经发布。
+适用于 Apple Silicon（arm64）Mac，无需预装 Node 或 git。GitHub Release 发布与 DMG asset 上传存在异步窗口；当前安装器对这个窗口的精确 tag 轮询和 checksum 校验仍待 Task 9 实现。因此源码版本号、Release 页面出现或 `latest` 更新，都不能单独证明对应 DMG 已经可下载并校验。
 
 一键安装：
 
@@ -113,11 +113,11 @@ v0.5.0 的管理页采用浅色冷灰画布、不透明表面和单一蓝色主�
 
 ## 安全边界
 
-- 服务只监听 `127.0.0.1`，不对公网开放；无遥测、无日志上传。
+- 默认配置把服务绑定到 `127.0.0.1:8787`；这才是管理页、发现 API 和 Key 操作的安全部署边界。若手工把 `proxy.listen` 改到非 loopback / 非回环地址，无认证管理面和显式 Key 导出接口都会暴露给该网络，存在配置篡改和凭据泄露风险，强烈禁止这样部署。
 - 固定和动态厂商 URL 由服务端 registry 重新解析，浏览器提交的派生 URL 不是权威值。
 - Custom 和 NIM 只允许 HTTPS，或 loopback HTTP；发现请求限制同源跳转并阻止公网/loopback 目标类别切换，降低 SSRF 与凭证转发风险。
 - 每个发现请求 10 秒超时，响应最多 4 MiB，最多 3 次同源跳转、5 页和 2,000 个模型；上游正文、堆栈和包含 Key 的模型字段不会返回。
-- API Key 只通过本机 POST body 参与检测，不进入 URL 或日志。保存后的 Key 位于 `~/.codex-switch/env`（mode `0600`），`config.toml` 只保存环境变量名。
+- API Key 只通过管理 POST body 参与检测，不进入 URL 或日志。管理页新增/轮换的 Key 位于 `~/.codex-switch/env`（mode `0600`），新配置只保存环境变量名。旧版 `config.toml` 的 inline `token` 仍能兼容读取，应尽快迁移到 env 文件并移除明文。
 - 正常列表、编辑和检测遵守“Key 不回显”：不会回填已保存值。现有“复制为 JSON”是明确的敏感导出操作，可能把 Key 写入剪贴板；页面会标注“含 API Key，勿外传”。
 - Codex 的 `~/.codex/auth.json` 和 `~/.codex/config.toml` 只读或手术式合并；应用前自动备份，可一键还原，不覆盖无关配置。
 

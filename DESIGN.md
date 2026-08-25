@@ -2,7 +2,7 @@
 
 ## 1. 目标与非目标
 
-codex-switch 是 Codex 与多个上游模型 provider 之间的本地薄代理。Codex 只配置一个 `model_provider`，代理读取请求体中的原始 `model` ID，选择对应上游，并原样转发请求体、响应体和 SSE。
+codex-switch 是 Codex 与多个上游模型 provider 之间的本地薄代理。Codex 只配置一个 `model_provider`，代理读取请求 JSON 中的原始 `model` ID，选择对应上游，并且不改写应用层 JSON 或 SSE event/data。它仍遵循正常 HTTP 代理语义处理 header、认证和传输编码，不能承诺网络层每个字节都不变化。
 
 v0.5.0 在转发路径之外增加通用 provider registry、发现 adapter、能力缓存和引导式管理页，使用户可以判断厂商是否支持 Responses、检测连接、搜索模型，并安全地持久化连接选项。
 
@@ -13,22 +13,24 @@ v0.5.0 在转发路径之外增加通用 provider registry、发现 adapter、�
 - 不把“Key 有效”或“能列出模型”当作 Responses 可路由的证明。
 - 不迁移或删除已有第三方 provider；全新配置只包含 ChatGPT 订阅。
 
-## 2. 不变量：零 body 改写
+## 2. 不变量：不改应用层 JSON / SSE payload
 
-代理只执行：读取 `body.model` → 查反向路由表 → 选择上游 → 透传。请求体在解析路由字段后仍使用收到的原始字节发送；普通响应和 SSE 以流方式逐字节回传，不增加、删除、重命名或规范化字段。
+代理只执行：读取 `body.model` → 查反向路由表 → 选择上游 → 透传。请求 JSON 在解析路由字段后仍使用收到的 body buffer 发送；响应 body 以流方式转发，不增加、删除、重命名或规范化应用层 JSON 字段和 SSE event/data。这里保证的是应用层 payload 语义，不是包含 HTTP framing、压缩编码在内的线缆字节恒等。
 
 模型 ID 必须等于上游实际接受的原始 ID。火山方舟的 Endpoint ID 和 Azure 的 Deployment ID 也直接作为 request `model`，不能在代理里做别名映射。
 
-## 3. 唯一允许的 header 变化：认证
+## 3. HTTP proxy header 与认证处理
 
 Codex 的 `codexswitch` provider 使用 `requires_openai_auth = true`，由 Codex 管理 OAuth 刷新。代理按目标 provider 处理认证：
 
 - `chatgpt_subscription`：保留 Codex OAuth `Authorization`；缺少时只补 `ChatGPT-Account-ID`。
 - `bearer`：移除 Codex OAuth 和 `ChatGPT-Account-ID`，注入 `Authorization: Bearer {$token_env}`。
-- `chatgpt_oauth`：使用环境变量中的 OAuth 值。
+- `chatgpt_oauth`：fallback 模式从 `~/.codex/auth.json` 只读取得 `tokens.access_token`，并读取 `tokens.account_id`（兼容顶层 `account_id`）设置 account header；不从 provider 环境变量取 OAuth。
 - `passthrough`：保留客户端认证 header。
 
-除了目标上游必需的认证变化，其余 header 和所有 body 字节不变。上游 401/403 等状态原样回到客户端；发现 API 的错误则走单独的脱敏状态模型。
+作为正常 HTTP 代理，请求侧会剥离 `host`、`content-length`、`connection`、`keep-alive`、`transfer-encoding`、`upgrade`、`proxy-connection`、`te`、`trailer`、`expect` 等 hop-by-hop / 重算 header，再由 `fetch` 为目标请求生成需要的传输 header。响应侧同样剥离 hop-by-hop header；由于 `fetch` 可能自动解压，代理还会移除原上游 `content-length` 和 `content-encoding`，由下游连接重新 framing。其他 end-to-end header 在没有认证冲突时继续转发。
+
+因此准确承诺是“不改应用层 JSON / SSE payload”，而不是“除认证外所有 header 和线缆字节不变”。上游 401/403 等状态原样回到客户端；发现 API 的错误则走单独的脱敏状态模型。
 
 ## 4. 总体架构
 
@@ -106,7 +108,9 @@ enabled = true
 
 `provider_type` 是稳定 adapter 身份，`provider_options` 保存厂商连接参数，`base_url` 保留给旧代码和转发路径。写入时 base URL 必须由 registry 重新派生，不能使用浏览器伪造值。
 
-`provider_options` 只接受字符串、布尔值和有限数字。旧 provider 若没有新字段仍可加载；已存在的 Bailian 配置不会因升级被删除。仓库和新 DMG 的 `config.toml` 默认只有 ChatGPT 订阅 provider。
+`provider_options` 只接受字符串、布尔值和有限数字。管理页新增或轮换的 Key 写入 `~/.codex-switch/env`（mode `0600`），新 provider 在 `config.toml` 中只引用 `token_env`。为向后兼容，legacy / 旧版 inline `token` 仍可解析、序列化，并在缺少 env 值时作为 bearer fallback；显式导出也能带出它以便迁移。inline token 会让明文留在配置和备份中，应迁移到 env 文件后移除，不能把兼容能力理解为推荐存储方式。
+
+旧 provider 若没有新字段仍可加载；已存在的 Bailian 配置不会因升级被删除。仓库和新 DMG 的 `config.toml` 默认只有 ChatGPT 订阅 provider。
 
 ## 8. Discovery adapter 架构
 
@@ -192,11 +196,11 @@ adapter table 隔离异构 API：
 
 ## 11. 安全限制
 
-发现服务与管理 API 只绑定 loopback。安全边界包括：
+默认配置将整个 server 绑定到 `127.0.0.1:8787`，发现服务与管理 API 因此只在本机可达。`proxy.listen` 是可手工修改的配置，server 当前不会强制 loopback，管理 API 是无认证管理面：若改到非 loopback / 非回环地址，provider CRUD、Codex 配置操作和显式 Key 导出都会暴露给该网络，存在远程配置篡改和凭据泄露风险，强烈禁止这样部署。以下安全边界均以保留默认 loopback bind 为前提：
 
 - Key 只从 POST body 进入内存和上游 `Authorization`；不写 URL、不进日志，不拼入错误信息。
 - 编辑页不回填已保存 Key；发现结果、warning 和错误正文均脱敏。包含完整 Key 的模型 ID/name/metadata 会整条丢弃。
-- 持久 Key 位于 `~/.codex-switch/env`，mode `0600`；`config.toml` 仅保存 `token_env` 名称。
+- 管理页新写入的持久 Key 位于 `~/.codex-switch/env`，mode `0600`；新配置只保存 `token_env` 名称。legacy inline `token` 仍为向后兼容可解析/序列化，必须迁移，不能视为安全默认值。
 - “复制为 JSON”是用户明确触发的敏感导出，可能把 Key 放入剪贴板；它不属于自动发现或普通编辑回显。
 - preset URL 由服务端重算；Custom/NIM 仅允许 HTTPS 或 loopback HTTP。
 - 跳转最多 3 次，必须保持同 origin 和同 destination class；公网不能跳到 loopback，凭证不能跨 origin。
@@ -240,4 +244,4 @@ Node 内置 test runner 和本地 stub HTTP server 覆盖 registry、URL 派生�
 
 自动化/stub 证据、官方文档兼容性证据和真实厂商 Key live 验证必须分开报告。没有本机可用 Key 时，只能声称确定性 adapter 测试和文档边界通过，不能声称厂商账号、权限、region 或 endpoint 已 live 验证。
 
-同样，`package.json` 版本、README 或设计文档更新不代表 GitHub Release workflow、DMG asset、checksum 或一键安装 E2E 已完成；这些属于后续发布任务，需要独立运行与验收证据。
+同样，`package.json` 版本、README 或设计文档更新不代表 GitHub Release workflow、DMG asset、checksum 或一键安装 E2E 已完成。Release publication 与 asset upload 存在异步窗口；精确 tag 的有界轮询、checksum 校验和 pending-asset 路径属于 Task 9，尚待实现和独立验收。
