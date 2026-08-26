@@ -145,6 +145,41 @@ fetch_json() {
   esac
 }
 
+resolve_latest_tag_from_web() {
+  latest_tag_output=$1
+  latest_remaining=$(remaining_seconds) || return 124
+  latest_timeout=$latest_remaining
+  [ "$latest_timeout" -le 20 ] || latest_timeout=20
+  latest_public_url="https://github.com/$REPO/releases/latest"
+  latest_effective_url=$(curl -fsSIL \
+    --max-time "$latest_timeout" --connect-timeout "$latest_timeout" \
+    -o /dev/null --write-out '%{url_effective}' "$latest_public_url" 2>/dev/null) \
+    || return 1
+  latest_tag_prefix="https://github.com/$REPO/releases/tag/"
+  case "$latest_effective_url" in
+    "$latest_tag_prefix"*) latest_tag=${latest_effective_url#"$latest_tag_prefix"} ;;
+    *) return 1 ;;
+  esac
+  case "$latest_tag" in ''|*/*|*\?*|*\#*) return 1 ;; esac
+  printf '%s\n' "$latest_tag" > "$latest_tag_output"
+  file_is_valid_tag "$latest_tag_output"
+}
+
+release_asset_available() {
+  asset_url=$1
+  asset_remaining=$(remaining_seconds) || return 124
+  asset_timeout=$asset_remaining
+  [ "$asset_timeout" -le 20 ] || asset_timeout=20
+  curl -fsSIL \
+    --max-time "$asset_timeout" --connect-timeout "$asset_timeout" \
+    -o /dev/null "$asset_url" >/dev/null 2>&1
+}
+
+direct_release_pair_ready() {
+  release_asset_available "$CHECKSUM_SRC" \
+    && release_asset_available "$SRC"
+}
+
 download_file() {
   url=$1
   output=$2
@@ -432,6 +467,7 @@ start_release_deadline() {
 # ---------- 1. 定位 DMG ----------
 if [ -z "$SRC" ]; then
   start_release_deadline
+  DIRECT_RELEASE_PROBE=false
   TAG_FILE="$WORK_DIR/release-tag"
   if [ -n "$RELEASE_TAG" ]; then
     printf '%s\n' "$RELEASE_TAG" > "$TAG_FILE"
@@ -444,12 +480,19 @@ if [ -z "$SRC" ]; then
     fetch_json "$API" "$WORK_DIR/latest.json" && latest_status=0 || latest_status=$?
     case "$latest_status" in
       0) ;;
-      75) die "GitHub API latest 查询受到限流；请在限制恢复后重跑安装命令。" ;;
+      75)
+        say "GitHub API latest 查询受到限流；改用公开 Release 地址继续安装…"
+        resolve_latest_tag_from_web "$TAG_FILE" \
+          || die "GitHub API 受到限流，且无法从公开 Release 地址读取最新版本。"
+        DIRECT_RELEASE_PROBE=true
+        ;;
       124) die "查询 latest Release 已达到 ${RELEASE_TIMEOUT_SECONDS}s 安全时限；请稍后重跑安装命令。" ;;
       *) die "无法读取 GitHub latest Release；请检查网络后重跑安装命令。" ;;
     esac
-    extract_tag_file "$WORK_DIR/latest.json" "$TAG_FILE" \
-      || die "latest Release 返回了无效 tag 或元数据，已停止安装。"
+    if [ "$DIRECT_RELEASE_PROBE" != true ]; then
+      extract_tag_file "$WORK_DIR/latest.json" "$TAG_FILE" \
+        || die "latest Release 返回了无效 tag 或元数据，已停止安装。"
+    fi
     IFS= read -r TAG < "$TAG_FILE" \
       || die "latest Release 返回了无效 tag 或元数据，已停止安装。"
   fi
@@ -468,15 +511,23 @@ if [ -z "$SRC" ]; then
   validate_poll_delays
   say "已锁定 Release ${TAG}；等待 $DMG_NAME 与 checksum…"
   ready=false
-  fetch_json "$TAG_API" "$WORK_DIR/release.json" && metadata_status=0 || metadata_status=$?
-  case "$metadata_status" in
-    0)
-      metadata_asset_pair_ready "$WORK_DIR/release.json" "$DMG_NAME" "$CHECKSUM_NAME" && ready=true || true
-      ;;
-    75) say "GitHub API 返回速率限制；将在安全时限内继续等待 ${TAG}…" ;;
-    124) ;;
-    *) say "GitHub API 暂时不可用；将在安全时限内继续等待 ${TAG}…" ;;
-  esac
+  if [ "$DIRECT_RELEASE_PROBE" = true ]; then
+    direct_release_pair_ready && ready=true || true
+  else
+    fetch_json "$TAG_API" "$WORK_DIR/release.json" && metadata_status=0 || metadata_status=$?
+    case "$metadata_status" in
+      0)
+        metadata_asset_pair_ready "$WORK_DIR/release.json" "$DMG_NAME" "$CHECKSUM_NAME" && ready=true || true
+        ;;
+      75)
+        say "GitHub API 返回速率限制；改用公开 Release 资产地址继续等待 ${TAG}…"
+        DIRECT_RELEASE_PROBE=true
+        direct_release_pair_ready && ready=true || true
+        ;;
+      124) ;;
+      *) say "GitHub API 暂时不可用；将在安全时限内继续等待 ${TAG}…" ;;
+    esac
+  fi
 
   if [ "$ready" != true ]; then
     for delay in $POLL_DELAYS; do
@@ -487,18 +538,32 @@ if [ -z "$SRC" ]; then
       sleep "$poll_wait"
       remaining_seconds >/dev/null || break
 
-      fetch_json "$TAG_API" "$WORK_DIR/release.json" && metadata_status=0 || metadata_status=$?
-      case "$metadata_status" in
-        0)
-          if metadata_asset_pair_ready "$WORK_DIR/release.json" "$DMG_NAME" "$CHECKSUM_NAME"; then
-            ready=true
-            break
-          fi
-          ;;
-        75) say "GitHub API 返回速率限制；将在安全时限内继续等待 ${TAG}…" ;;
-        124) break ;;
-        *) say "GitHub API 暂时不可用；将在安全时限内继续等待 ${TAG}…" ;;
-      esac
+      if [ "$DIRECT_RELEASE_PROBE" = true ]; then
+        if direct_release_pair_ready; then
+          ready=true
+          break
+        fi
+      else
+        fetch_json "$TAG_API" "$WORK_DIR/release.json" && metadata_status=0 || metadata_status=$?
+        case "$metadata_status" in
+          0)
+            if metadata_asset_pair_ready "$WORK_DIR/release.json" "$DMG_NAME" "$CHECKSUM_NAME"; then
+              ready=true
+              break
+            fi
+            ;;
+          75)
+            say "GitHub API 返回速率限制；改用公开 Release 资产地址继续等待 ${TAG}…"
+            DIRECT_RELEASE_PROBE=true
+            if direct_release_pair_ready; then
+              ready=true
+              break
+            fi
+            ;;
+          124) break ;;
+          *) say "GitHub API 暂时不可用；将在安全时限内继续等待 ${TAG}…" ;;
+        esac
+      fi
     done
   fi
   if [ "$ready" != true ]; then

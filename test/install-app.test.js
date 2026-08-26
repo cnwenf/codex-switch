@@ -237,10 +237,14 @@ printf '%s\n' "$((now + FAKE_CURL_ADVANCE_SECONDS))" > "$FAKE_NOW_FILE"
 status=200
 curl_exit=0
 body=
+effective_url=$url
 case "$url" in
-  */releases/latest)
+  https://api.github.com/*/releases/latest)
     status=$FAKE_LATEST_STATUS
     body=$FAKE_LATEST_JSON
+    ;;
+  https://github.com/*/releases/latest)
+    effective_url="https://github.com/cnwenf/codex-switch/releases/tag/$FAKE_LATEST_TAG"
     ;;
   */releases/tags/*)
     count=0
@@ -272,7 +276,12 @@ if [ -n "$body" ]; then
     /bin/cat "$body"
   fi
 fi
-[ -z "$write_out" ] || printf '%s' "$status"
+if [ -n "$write_out" ]; then
+  case "$write_out" in
+    *url_effective*) printf '%s' "$effective_url" ;;
+    *) printf '%s' "$status" ;;
+  esac
+fi
 [ "$curl_exit" -eq 0 ] || exit "$curl_exit"
 if [ "$fail_on_http" = true ] && [ "$status" -ge 400 ]; then
   exit 22
@@ -365,6 +374,7 @@ printf '%s\n' "$1" >> "$FAKE_SLEEP_LOG"
     FAKE_NOW_FILE: path.join(root, 'now'),
     FAKE_LATEST_JSON: path.join(root, 'latest.json'),
     FAKE_LATEST_STATUS: String(latestStatus),
+    FAKE_LATEST_TAG: tag,
     FAKE_TAG_STATE: path.join(root, 'tag-state'),
     FAKE_TAG_DIR: tagDir,
     FAKE_DMG: dmg,
@@ -568,6 +578,26 @@ test('latest install freezes one tag and downloads the exact DMG/checksum pair',
   ]);
   assert.match(result.stdout, /SHA-256 校验通过/);
   assert.match(readLog(fixture.logs.open).join('\n'), new RegExp(fixture.dest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('latest install falls back to public release URLs when anonymous API quota is exhausted', (t) => {
+  const tag = 'v0.5.0';
+  const fixture = createFixture(t, { tag, latestStatus: 403 });
+
+  const result = runInstaller(fixture);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /API.*限流.*公开 Release/);
+  assert.deepEqual(readLog(fixture.logs.curl), [
+    'https://api.github.com/repos/cnwenf/codex-switch/releases/latest',
+    'https://github.com/cnwenf/codex-switch/releases/latest',
+    'https://github.com/cnwenf/codex-switch/releases/download/v0.5.0/CodexSwitch-0.5.0-macos-arm64.dmg.sha256',
+    'https://github.com/cnwenf/codex-switch/releases/download/v0.5.0/CodexSwitch-0.5.0-macos-arm64.dmg',
+    'https://github.com/cnwenf/codex-switch/releases/download/v0.5.0/CodexSwitch-0.5.0-macos-arm64.dmg',
+    'https://github.com/cnwenf/codex-switch/releases/download/v0.5.0/CodexSwitch-0.5.0-macos-arm64.dmg.sha256',
+  ]);
+  assert.equal(readLog(fixture.logs.sleep).length, 0);
+  assert.match(result.stdout, /SHA-256 校验通过/);
 });
 
 test('latest install polls only the frozen tag until both assets are present', (t) => {
@@ -854,7 +884,7 @@ test('release polling enforces a real wall-clock deadline and caps every API cur
   assert.equal(readLog(fixture.logs.curl).some((url) => url.includes('/releases/download/')), false);
 });
 
-test('real metadata curl retries outside curl and cannot exceed a two-second wall-clock deadline', async (t) => {
+test('a real rate-limited metadata request switches to public assets within the deadline', async (t) => {
   const fixture = createFixture(t, {
     pollDelays: '0 0',
     timeoutSeconds: 2,
@@ -871,32 +901,24 @@ test('real metadata curl retries outside curl and cannot exceed a two-second wal
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /等待 Release 资产超时/);
   assert.ok(elapsedMs < 3200, `two-second deadline overran: ${elapsedMs}ms`);
-  let events = readLog(server.eventLog);
-  for (let attempt = 0; attempt < 50 && !events.includes('response-2-client-closed'); attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    events = readLog(server.eventLog);
-  }
-  assert.deepEqual(events.filter((event) => event.startsWith('request-')), ['request-1', 'request-2']);
+  const events = readLog(server.eventLog);
+  assert.deepEqual(events.filter((event) => event.startsWith('request-')), ['request-1']);
   assert.equal(events.includes('response-1-429'), true);
-  assert.equal(events.includes('response-2-blocking-start'), true);
-  assert.equal(events.includes('response-2-client-closed'), true);
+  assert.equal(events.includes('response-2-blocking-start'), false);
   const metadataArgs = readLog(fixture.logs.curlArgs).filter((line) => line.includes('/releases/tags/'));
-  assert.equal(metadataArgs.length, 2);
+  assert.equal(metadataArgs.length, 1);
   assert.equal(metadataArgs.every((line) => !/--retry(?:[ -]|$)/.test(line)), true);
+  assert.equal(readLog(fixture.logs.curlArgs).some((line) => line.includes('/releases/download/')), true);
 });
 
-test('GitHub 429 and 403 rate limits retry only inside the frozen-tag deadline', (t) => {
+test('GitHub rate limits switch an exact tag immediately to public release assets', (t) => {
   const tag = 'v0.5.0';
   const dmgName = 'CodexSwitch-0.5.0-macos-arm64.dmg';
   const checksumName = `${dmgName}.sha256`;
   const fixture = createFixture(t, {
     tag,
-    tagResponses: [
-      releaseJson(tag),
-      releaseJson(tag),
-      releaseJson(tag, [dmgName, checksumName]),
-    ],
-    tagStatuses: [429, 403, 200],
+    tagResponses: [releaseJson(tag)],
+    tagStatuses: [429],
     pollDelays: '1 1 1',
     timeoutSeconds: 30,
   });
@@ -904,8 +926,10 @@ test('GitHub 429 and 403 rate limits retry only inside the frozen-tag deadline',
   const result = runInstaller(fixture, ['--release-tag', tag]);
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /GitHub API.*(?:限流|速率限制)/);
-  assert.equal(readLog(fixture.logs.curl).filter((url) => url.includes('/releases/tags/')).length, 3);
+  assert.match(result.stdout, /GitHub API.*速率限制.*公开 Release/);
+  assert.equal(readLog(fixture.logs.curl).filter((url) => url.includes('/releases/tags/')).length, 1);
+  assert.equal(readLog(fixture.logs.curl).filter((url) => url.includes('/releases/download/')).length, 4);
+  assert.equal(readLog(fixture.logs.sleep).length, 0);
   const tagArgs = readLog(fixture.logs.curlArgs).filter((line) => line.includes('/releases/tags/'));
   assert.equal(tagArgs.every((line) => !/--retry(?:[ -]|$)/.test(line)), true);
   assert.match(result.stdout, /SHA-256 校验通过/);
