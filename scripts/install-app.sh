@@ -13,8 +13,6 @@
 # 幂等:重复执行 = 覆盖升级到目标版本。安装前会停掉正在运行的旧实例。
 set -e
 umask 077
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd -P) \
-  || { printf '[install] 无法定位安全安装器目录。\n' >&2; exit 1; }
 
 APP_NAME="Codex Switch"
 DEST_OVERRIDE_SET=false
@@ -640,7 +638,7 @@ INSTALL_NODE="$SRC_APP/Contents/MacOS/node"
 
 say "安装到 $DEST…"
 validate_install_destination
-INSTALL_HELPER="$SCRIPT_DIR/install-app-bundle.cjs"
+INSTALL_HELPER="$SRC_APP/Contents/Resources/app/scripts/install-app-bundle.cjs"
 [ -f "$INSTALL_HELPER" ] || die "缺少共享安全换包实现，拒绝安装。"
 # Node ships inside the signed app, so the installer does not depend on a
 # system scripting runtime. All entry points share this staging/rename/rollback

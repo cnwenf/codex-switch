@@ -194,7 +194,12 @@ function createFixture(t, {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.mkdirSync(path.join(mount, 'Codex Switch.app'), { recursive: true });
   fs.mkdirSync(path.join(mount, 'Codex Switch.app', 'Contents', 'MacOS'), { recursive: true });
+  fs.mkdirSync(path.join(mount, 'Codex Switch.app', 'Contents', 'Resources', 'app', 'scripts'), { recursive: true });
   fs.symlinkSync(process.execPath, path.join(mount, 'Codex Switch.app', 'Contents', 'MacOS', 'node'));
+  fs.copyFileSync(
+    APP_BUNDLE_INSTALLER,
+    path.join(mount, 'Codex Switch.app', 'Contents', 'Resources', 'app', 'scripts', 'install-app-bundle.cjs'),
+  );
 
   const version = tag.slice(1);
   const dmgName = `CodexSwitch-${version}-macos-arm64.dmg`;
@@ -392,6 +397,16 @@ function runInstaller(fixture, source) {
   return spawnSync('sh', args, {
     cwd: REPO_ROOT,
     env: fixture.env,
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+  });
+}
+
+function runPipedInstaller(fixture, source) {
+  return spawnSync('sh', ['-s', '--', source], {
+    cwd: fixture.root,
+    env: fixture.env,
+    input: fs.readFileSync(INSTALLER, 'utf8'),
     encoding: 'utf8',
     maxBuffer: 1024 * 1024,
   });
@@ -1021,6 +1036,18 @@ test('a local DMG bypasses curl and preserves the installation/launch path', (t)
   assert.equal(fs.statSync(fixture.dest).isDirectory(), true);
   assert.equal(fs.existsSync(path.join(fixture.dest, 'Contents', 'MacOS', 'node')), true);
   assert.match(readLog(fixture.logs.open).join('\n'), new RegExp(fixture.dest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('a curl-piped installer uses the bundle swap helper embedded in the mounted app', (t) => {
+  const fixture = createFixture(t);
+
+  const result = runPipedInstaller(fixture, fixture.dmg);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.doesNotMatch(result.stderr, /缺少共享安全换包实现/);
+  assert.equal(fs.lstatSync(fixture.dest).isSymbolicLink(), false);
+  assert.equal(fs.statSync(fixture.dest).isDirectory(), true);
+  assert.equal(fs.existsSync(path.join(fixture.dest, 'Contents', 'MacOS', 'node')), true);
 });
 
 test('installer rejects unsafe destination overrides before mount or copy', async (t) => {
