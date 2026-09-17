@@ -108,7 +108,7 @@ test('provider and model results use remaining-height scrolling inside the respo
   assert.match(mobile, /\.listbox\{[^}]*max-height:calc\(100dvh\s*-/);
 });
 
-test('light semantic color tokens keep text, accent, and statuses at WCAG AA contrast', () => {
+test('dark neutral color tokens keep text, accent, and statuses at WCAG AA contrast', () => {
   const html = render();
   const tokens = cssTokens(html);
   for (const token of [
@@ -124,7 +124,8 @@ test('light semantic color tokens keep text, accent, and statuses at WCAG AA con
   ]) {
     assert.match(tokens[token] || '', /^oklch\(/, `missing semantic OKLCH token ${token}`);
   }
-  assert.ok(relativeLuminance(tokens['--color-canvas']) >= 0.82, 'canvas must be visibly light');
+  assert.ok(relativeLuminance(tokens['--color-canvas']) < 0.08, 'canvas must be visibly dark');
+  assert.ok(contrastRatio(tokens['--color-on-accent'], tokens['--color-accent']) >= 4.5);
   for (const foreground of [
     '--color-text',
     '--color-text-secondary',
@@ -214,7 +215,7 @@ test('every mobile interaction family exposes a 44 by 44 pixel hit area', () => 
 
 test('tabs, panels, and import textarea expose complete programmatic semantics', () => {
   const html = render();
-  assert.match(html, /<nav id="managementTabs" class="tabs" role="tablist" aria-label="管理页面" aria-orientation="horizontal">/);
+  assert.match(html, /<nav id="managementTabs" class="tabs" role="tablist" aria-label="管理页面" aria-orientation="vertical">/);
   assert.match(html, /id="tabbtn-providers"[^>]*role="tab"[^>]*aria-selected="true"[^>]*aria-controls="tab-providers"/);
   assert.match(html, /id="tabbtn-history"[^>]*role="tab"[^>]*aria-selected="false"[^>]*aria-controls="tab-history"/);
   assert.match(html, /id="tabbtn-providers"[^>]*tabindex="0"/);
@@ -229,6 +230,8 @@ test('tablist arrow, Home, and End keys move focus and activate the target view'
   const page = await import('../src/admin-page.js');
   assert.equal(typeof page.tabIndexForKey, 'function');
   assert.equal(page.tabIndexForKey(0, 2, 'ArrowRight'), 1);
+  assert.equal(page.tabIndexForKey(0, 2, 'ArrowDown'), 1);
+  assert.equal(page.tabIndexForKey(0, 2, 'ArrowUp'), 1);
   assert.equal(page.tabIndexForKey(1, 2, 'ArrowRight'), 0);
   assert.equal(page.tabIndexForKey(0, 2, 'ArrowLeft'), 1);
   assert.equal(page.tabIndexForKey(1, 2, 'ArrowLeft'), 0);
@@ -277,7 +280,7 @@ test('disabled provider cards and reference options do not fade their text throu
 
   assert.doesNotMatch(disabledCard, /(?:^|;)\s*opacity\s*:/);
   assert.match(disabledCard, /background:/);
-  assert.match(disabledCard, /border-color:/);
+  assert.match(cssRule(html, '.pcard.off .dot'), /background:var\(--color-text-muted\)/);
   assert.doesNotMatch(referenceOption, /(?:^|;)\s*opacity\s*:/);
   assert.match(referenceOption, /background:/);
   assert.match(referenceOption, /border-color:/);
@@ -417,6 +420,26 @@ test('provider editor shows masked saved keys with individual delete controls', 
   assert.match(html, /id="savedApiKeyList"/);
   assert.match(html, /已保存的 Key/);
   assert.match(html, /delete_api_key_ids/);
+  assert.match(cssRule(html, '.saved-key-row'), /display:flex/);
+  assert.match(cssRule(html, '.saved-key-copy'), /flex:1;min-width:0/);
+  assert.match(cssRule(html, '.saved-key-row .btn'), /flex:none/);
+  assert.match(html, /button\.setAttribute\('aria-pressed',String\(pending\)\)/);
+  assert.match(html, /pending\?'撤销':'删除'/);
+  assert.match(html, /saved-api-key-delete\[aria-pressed="true"\]/);
+  assert.doesNotMatch(html, /checkbox\.className='saved-api-key-delete'/);
+  assert.match(cssRule(html, '[hidden]'), /display:none!important/);
+});
+
+test('light appearance follows system preference with accessible neutral colors', () => {
+  const html = render();
+  assert.match(cssRule(html, 'html'), /color-scheme:light dark/);
+  const light = cssAtRule(html, '@media(prefers-color-scheme:light)');
+  const tokens = Object.fromEntries([...light.matchAll(/(--[a-z0-9-]+):([^;]+)/g)].map(m => [m[1], m[2]]));
+  assert.ok(relativeLuminance(tokens['--color-canvas']) > .9);
+  for (const name of ['text', 'text-secondary', 'text-muted', 'accent', 'success', 'warning', 'error']) {
+    assert.ok(contrastRatio(tokens['--color-'+name], tokens['--color-surface']) >= 4.5, name);
+  }
+  assert.ok(contrastRatio(tokens['--color-on-accent'], tokens['--color-accent']) >= 4.5);
 });
 
 test('clipboard export contains metadata only and JSON import always clears credential fields', async () => {

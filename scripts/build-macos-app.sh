@@ -71,76 +71,20 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# ---------- 5. 启动器:优先真 AppKit 应用(连 WindowServer,Dock 图标不无限弹跳);无 swiftc 回退 sh ----------
-write_shell_launcher() {
-cat > "$MACOS_DIR/codex-switch-launcher" <<'LAUNCHER'
-#!/bin/sh
-DIR="$(cd "$(dirname "$0")" && pwd)"
-NODE="$DIR/node"
-APP="$DIR/../Resources/app"
-CFG="$APP/config.toml"
-PORT=$(sed -n 's/^listen *= *"[0-9.]*:\([0-9]*\)"/\1/p' "$CFG" 2>/dev/null | head -1)
-PORT="${PORT:-8787}"
-URL="http://127.0.0.1:$PORT/"
-mkdir -p "$HOME/.codex-switch"
-MB_APP_SRC="$DIR/../Resources/CodexSwitchMenuBar.app"
-MB_APP_DST="$HOME/.codex-switch/CodexSwitchMenuBar.app"
-start_menubar() {
-  # 菜单栏是独立的 LSUIElement=true 小 .app(自己的 bundle id):
-  # 必须用 open 作为独立 App 启动(独立 LaunchServices ASN);若直接作为
-  # 本应用的子进程启动,macOS 会把它归入本应用 ASN,其 accessory 策略
-  # 会把主 App 拖成 UIElement,导致 Dock/⌘Tab 里看不到本应用。
-  [ -d "$MB_APP_SRC" ] || return 0
-  pkill -f "CodexSwitchMenuBar.app/Contents/MacOS" 2>/dev/null
-  sleep 0.3
-  rm -rf "$MB_APP_DST" 2>/dev/null
-  cp -R "$MB_APP_SRC" "$MB_APP_DST" 2>/dev/null || return 0
-  open -g "$MB_APP_DST" --args --port "$PORT" --launcher-pid "$$" 2>/dev/null || return 0
-  sleep 0.6
-  MB_PID=$(pgrep -f "CodexSwitchMenuBar.app/Contents/MacOS" | head -1)
-}
-if lsof -tnP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  open "$URL"   # 已有实例在跑(源码安装或另一个 App 实例),直接打开管理页
-  exit 0
-fi
-[ -f "$HOME/.codex-switch/env" ] && . "$HOME/.codex-switch/env"
-"$NODE" --use-system-ca "$APP/src/server.js" >> "$HOME/.codex-switch/run.log" 2>&1 &
-SERVER_PID=$!
-start_menubar
-stop_all() {
-  # 退出前先还原官方 Codex 配置(撤销本应用注入的代理设置)
-  curl -fsS -m 8 -X POST "http://127.0.0.1:$PORT/__admin/codex-restore" >> "$HOME/.codex-switch/run.log" 2>&1 || true
-  kill $SERVER_PID 2>/dev/null
-  # 菜单栏是独立小 .app(open 启动):优先按记录 PID 杀,兜底按进程名
-  { [ -n "${MB_PID:-}" ] && kill "$MB_PID" 2>/dev/null; } || pkill -f "CodexSwitchMenuBar.app/Contents/MacOS" 2>/dev/null
-  exit 0
-}
-trap stop_all TERM INT
-i=0
-while [ $i -lt 20 ]; do
-  if lsof -tnP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then break; fi
-  kill -0 $SERVER_PID 2>/dev/null || break   # 进程已退出(启动失败,看 run.log)
-  sleep 0.4
-  i=$((i+1))
-done
-open "$URL"
-wait $SERVER_PID
-LAUNCHER
-chmod +x "$MACOS_DIR/codex-switch-launcher"
-}
+# ---------- 5. 原生 AppKit + WebKit 窗口，编译失败时不发布降级产物 ----------
 
 LAUNCHER_SWIFT=assets/launcher/CodexSwitchLauncher.swift
 if [ -f "$LAUNCHER_SWIFT" ] && command -v swiftc >/dev/null 2>&1; then
-  if swiftc -O -framework AppKit "$LAUNCHER_SWIFT" -o "$MACOS_DIR/codex-switch-launcher" 2>/dev/null; then
+  if swiftc -O -framework AppKit -framework WebKit "$LAUNCHER_SWIFT" -o "$MACOS_DIR/codex-switch-launcher"; then
     chmod +x "$MACOS_DIR/codex-switch-launcher"
     echo "[build] launcher built: Swift AppKit (Dock 图标不弹跳)"
   else
-    echo "[build] WARN: Swift launcher 编译失败,回退 sh 启动器" >&2
-    write_shell_launcher
+    echo "[build] ERROR: 原生窗口启动器编译失败" >&2
+    exit 1
   fi
 else
-  echo "[build] skip Swift launcher(无 swiftc),使用 sh 启动器"
-  write_shell_launcher
+  echo "[build] ERROR: 构建原生 App 需要 swiftc" >&2
+  exit 1
 fi
 
 # ---------- 5.5 菜单栏小程序(可选;无 swiftc 时跳过,App 其余功能不受影响) ----------

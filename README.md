@@ -95,7 +95,7 @@ sh scripts/install-app.sh /path/to/CodexSwitch.dmg
 xattr -cr "/Applications/Codex Switch.app"
 ```
 
-App 默认用 macOS LaunchAgent 在登录时启动，菜单栏可查看状态、打开配置页、检查更新或退出。退出 App 会剥离 codex-switch 注入的 Codex 配置，保留 Codex 自己的其他设置。
+App 默认用 macOS LaunchAgent 在登录时启动，管理界面在独立原生窗口中打开，不再弹出浏览器标签页。关闭窗口不会停服务，可从 Dock 或菜单栏重新打开。菜单栏可查看状态、检查更新或退出。退出 App 会剥离 codex-switch 注入的 Codex 配置，保留 Codex 自己的其他设置。
 
 源码启动和打包 App 都显式使用 Node 的 `--use-system-ca`：Node 同时信任内置根证书、macOS 系统证书库，以及调用方已有的 `NODE_EXTRA_CA_CERTS`。启动器不会改写该环境变量，也不会生成本地 CA bundle 或临时证书文件。
 
@@ -121,7 +121,7 @@ cd codex-switch
 
 ## 管理页
 
-v0.5.0 的管理页采用浅色冷灰画布、不透明表面和单一蓝色主色，供应商以记录列表展示；移动端的编辑界面是带固定头尾操作区的全屏 sheet。厂商和模型都是可搜索、可键盘操作的 combobox，状态同时使用文字和图标，不只依赖颜色。
+管理界面采用 ChatGPT 风格的中性灰侧栏与简洁内容区，深浅主题自动跟随系统。API Key 列表保留首尾脱敏展示，支持追加、逐项删除和撤销，保存后生效；已有连接设置折叠展示。窄屏编辑界面为固定头尾操作区的全屏 sheet。厂商和模型支持搜索与键盘操作，状态同时使用文字和图标。
 
 页面保留供应商 CRUD/启停/复制、配置历史与还原、Codex 应用与还原、开机自启、更新检查、模型发现和能力刷新。视觉重设计没有改变这些 API、payload、路由规则或保存动作。
 

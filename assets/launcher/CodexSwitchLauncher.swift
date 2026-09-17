@@ -7,8 +7,8 @@
 // Dock 右键「退出」/ ⌘Q(applicationShouldTerminate),「从应用列表退出自动还原配置」
 // 也走同一套清理逻辑。
 //
-// 语义与旧 sh 启动器对齐:
-//  - 端口已被占 → 只打开配置页并退出(不抢已有实例);
+// 服务生命周期保持原有语义:
+//  - 端口已被占 → 只打开原生配置窗口,不接管已有服务;
 //  - 否则加载 ~/.codex-switch/env、拉起内嵌 node 服务(输出追加 run.log),
 //    并经 open -g 启动菜单栏小 .app(--launcher-pid = 本进程);
 //  - 收到 SIGTERM/INT,或 Dock/⌘Q 退出 → 先 POST /__admin/codex-restore 还原注入的
@@ -18,6 +18,7 @@
 
 import AppKit
 import Foundation
+import WebKit
 
 let bundlePath = Bundle.main.bundlePath
 let nodeBin = bundlePath + "/Contents/MacOS/node"
@@ -67,9 +68,72 @@ func run(_ path: String, _ args: [String], wait: Bool = true) -> Int32 {
 
 var serverChild: Process?
 var cleaningUp = false
+let windowController = SettingsWindowController()
 
 func openPage() {
-  if let u = URL(string: baseURL + "/") { NSWorkspace.shared.open(u) }
+  windowController.show()
+}
+
+// Reuse the local UI in one native window, without opening a browser tab.
+final class SettingsWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
+  private var window: NSWindow?
+
+  func show() {
+    if window == nil {
+      let view = WKWebView(frame: .zero)
+      view.navigationDelegate = self
+      view.uiDelegate = self
+      let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 800),
+                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                           backing: .buffered, defer: false)
+      panel.title = "Codex Switch"
+      panel.minSize = NSSize(width: 560, height: 520)
+      panel.backgroundColor = .windowBackgroundColor
+      panel.contentView = view
+      panel.isReleasedWhenClosed = false
+      panel.center()
+      panel.setFrameAutosaveName("CodexSwitchSettings")
+      window = panel
+      view.load(URLRequest(url: URL(string: baseURL + "/")!))
+    }
+    window?.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
+  func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+               decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    guard let url = action.request.url else { decisionHandler(.cancel); return }
+    if url.scheme == "http", url.host == "127.0.0.1", url.port == Int(port),
+       action.targetFrame?.isMainFrame == true {
+      decisionHandler(.allow)
+    } else {
+      if action.navigationType == .linkActivated, ["https", "http"].contains(url.scheme ?? "") {
+        NSWorkspace.shared.open(url)
+      }
+      decisionHandler(.cancel)
+    }
+  }
+
+  func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+               initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+    let alert = NSAlert()
+    alert.messageText = "Codex Switch"
+    alert.informativeText = message
+    alert.addButton(withTitle: "好")
+    guard let window else { completionHandler(); return }
+    alert.beginSheetModal(for: window) { _ in completionHandler() }
+  }
+
+  func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+               initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+    let alert = NSAlert()
+    alert.messageText = "确认操作"
+    alert.informativeText = message
+    alert.addButton(withTitle: "确认")
+    alert.addButton(withTitle: "取消")
+    guard let window else { completionHandler(false); return }
+    alert.beginSheetModal(for: window) { response in completionHandler(response == .alertFirstButtonReturn) }
+  }
 }
 
 func startMenubar() {
@@ -109,6 +173,8 @@ func startServer() {
 func cleanup(restore: Bool) {
   if cleaningUp { return }
   cleaningUp = true
+  // Attaching a window to an existing service does not transfer its ownership.
+  guard serverChild != nil else { return }
   if restore {
     run("/usr/bin/curl", ["-fsS", "-m", "8", "-X", "POST", baseURL + "/__admin/codex-restore"])
   }
@@ -118,9 +184,32 @@ func cleanup(restore: Bool) {
 
 final class LauncherDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ n: Notification) {
+    let mainMenu = NSMenu()
+    let appItem = NSMenuItem()
+    let appMenu = NSMenu()
+    appMenu.addItem(withTitle: "退出 Codex Switch", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    appItem.submenu = appMenu
+    mainMenu.addItem(appItem)
+    let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
+    let editMenu = NSMenu(title: "编辑")
+    for (title, action, key) in [("撤销", "undo:", "z"), ("剪切", "cut:", "x"), ("复制", "copy:", "c"), ("粘贴", "paste:", "v"), ("全选", "selectAll:", "a")] {
+      editMenu.addItem(withTitle: title, action: Selector(action), keyEquivalent: key)
+    }
+    editItem.submenu = editMenu
+    mainMenu.addItem(editItem)
+    let windowItem = NSMenuItem(title: "窗口", action: nil, keyEquivalent: "")
+    let windowMenu = NSMenu(title: "窗口")
+    windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+    windowMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    windowItem.submenu = windowMenu
+    mainMenu.addItem(windowItem)
+    NSApp.windowsMenu = windowMenu
+    NSApp.mainMenu = mainMenu
+    DistributedNotificationCenter.default().addObserver(self, selector: #selector(showSettings),
+      name: Notification.Name("CodexSwitchOpenSettings"), object: String(getpid()))
     if portListening() {   // 已有实例在跑(源码安装或另一个 App),只打开管理页
       openPage()
-      exit(0)
+      return
     }
     startServer()
     startMenubar()
@@ -135,7 +224,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
-  // 点 Dock 图标 → 打开配置页(本应用无窗口,用页面当主界面)
+  @objc private func showSettings() { openPage() }
+
+  // Closing the window keeps the proxy running; Dock and menu bar reopen it.
+  func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+  // 点 Dock 图标 → 重新打开配置窗口
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
     openPage()
     return true

@@ -94,8 +94,8 @@ export function tabIndexForKey(current, length, key) {
   if (!length || current < 0 || current >= length) return -1;
   if (key === 'Home') return 0;
   if (key === 'End') return length - 1;
-  if (key === 'ArrowRight') return (current + 1) % length;
-  if (key === 'ArrowLeft') return (current - 1 + length) % length;
+  if (key === 'ArrowRight' || key === 'ArrowDown') return (current + 1) % length;
+  if (key === 'ArrowLeft' || key === 'ArrowUp') return (current - 1 + length) % length;
   return -1;
 }
 
@@ -220,33 +220,33 @@ export function renderAdminPage({ host, port, version }) {
 <title>codex-switch · 供应商管理</title>
 <style>
 :root{
-  --color-canvas:oklch(.965 .006 255);
-  --color-surface:oklch(.99 .003 255);
-  --color-surface-muted:oklch(.945 .008 255);
-  --color-surface-hover:oklch(.925 .018 255);
-  --color-border:oklch(.84 .015 255);
-  --color-border-strong:oklch(.62 .025 255);
-  --color-text:oklch(.25 .025 255);
-  --color-text-secondary:oklch(.43 .025 255);
-  --color-text-muted:oklch(.47 .025 255);
-  --color-accent:oklch(.5 .19 255);
-  --color-accent-hover:oklch(.44 .19 255);
-  --color-accent-soft:oklch(.93 .04 255);
-  --color-on-accent:oklch(.985 .004 255);
-  --color-success:oklch(.42 .115 150);
-  --color-success-soft:oklch(.94 .035 150);
-  --color-warning:oklch(.44 .105 75);
-  --color-warning-soft:oklch(.94 .04 75);
-  --color-error:oklch(.48 .18 25);
-  --color-error-soft:oklch(.94 .04 25);
-  --color-overlay:oklch(.22 .015 255 / .42);
+  --color-canvas:oklch(.245 .003 255);
+  --color-surface:oklch(.275 .003 255);
+  --color-surface-muted:oklch(.215 .003 255);
+  --color-surface-hover:oklch(.32 .003 255);
+  --color-border:oklch(.37 .004 255);
+  --color-border-strong:oklch(.59 .004 255);
+  --color-text:oklch(.95 .003 255);
+  --color-text-secondary:oklch(.77 .004 255);
+  --color-text-muted:oklch(.71 .004 255);
+  --color-accent:oklch(.93 .003 255);
+  --color-accent-hover:oklch(.84 .004 255);
+  --color-accent-soft:oklch(.39 .005 255);
+  --color-on-accent:oklch(.22 .003 255);
+  --color-success:oklch(.79 .12 160);
+  --color-success-soft:oklch(.29 .025 160);
+  --color-warning:oklch(.83 .10 80);
+  --color-warning-soft:oklch(.30 .025 80);
+  --color-error:oklch(.79 .12 25);
+  --color-error-soft:oklch(.30 .035 25);
+  --color-overlay:oklch(.12 .003 255 / .72);
   --font-sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
   --font-mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;
-  --font-size-title:1.375rem;
+  --font-size-title:1.75rem;
   --font-size-section:1rem;
   --font-size-body:.875rem;
   --font-size-metadata:.75rem;
-  --line-title:1.75rem;
+  --line-title:2.25rem;
   --line-section:1.375rem;
   --line-body:1.3125rem;
   --line-metadata:1.125rem;
@@ -260,17 +260,42 @@ export function renderAdminPage({ host, port, version }) {
   --control-height:2.5rem;
   --control-height-touch:2.75rem;
   --radius-sm:.375rem;
-  --radius-md:.625rem;
-  --radius-lg:.875rem;
+  --radius-md:.75rem;
+  --radius-lg:1rem;
   --radius-full:999px;
-  --content-width:70rem;
+  --content-width:58rem;
   --prose-width:72ch;
   --shadow-control:0 1px 2px oklch(.25 .02 255 / .08);
   --shadow-dialog:0 1.5rem 4rem oklch(.22 .02 255 / .22);
 }
 *{box-sizing:border-box}
-html{color-scheme:light;background:var(--color-canvas)}
-body{margin:0;min-height:100vh;min-width:0;overflow-x:hidden;color:var(--color-text);font:var(--font-size-body)/var(--line-body) var(--font-sans);background:var(--color-canvas)}
+[hidden]{display:none!important}
+html{color-scheme:light dark;background:var(--color-canvas)}
+@media(prefers-color-scheme:light){
+  :root{
+    --color-canvas:oklch(.995 .001 255);
+    --color-surface:oklch(.99 .001 255);
+    --color-surface-muted:oklch(.97 .002 255);
+    --color-surface-hover:oklch(.93 .003 255);
+    --color-border:oklch(.87 .003 255);
+    --color-border-strong:oklch(.62 .004 255);
+    --color-text:oklch(.25 .003 255);
+    --color-text-secondary:oklch(.44 .004 255);
+    --color-text-muted:oklch(.48 .004 255);
+    --color-accent:oklch(.25 .003 255);
+    --color-accent-hover:oklch(.38 .004 255);
+    --color-accent-soft:oklch(.90 .003 255);
+    --color-on-accent:oklch(.99 .001 255);
+    --color-success:oklch(.43 .10 160);
+    --color-success-soft:oklch(.96 .02 160);
+    --color-warning:oklch(.45 .09 80);
+    --color-warning-soft:oklch(.96 .02 80);
+    --color-error:oklch(.49 .16 25);
+    --color-error-soft:oklch(.97 .015 25);
+    --color-overlay:oklch(.20 .003 255 / .42);
+  }
+}
+body{margin:0;min-height:100vh;min-width:0;padding-left:15rem;color:var(--color-text);font:var(--font-size-body)/var(--line-body) var(--font-sans);background:var(--color-canvas)}
 button,input,select,textarea{font:inherit}
 ::selection{background:var(--color-accent-soft);color:var(--color-text)}
 .mono{font-family:var(--font-mono);font-size:var(--font-size-metadata);overflow-wrap:anywhere}
@@ -280,28 +305,31 @@ button,input,select,textarea{font:inherit}
 .note{margin:var(--space-1) 0 0;max-width:72ch;font-size:var(--font-size-body);color:var(--color-text-secondary);line-height:var(--line-body);overflow-wrap:anywhere}
 .hint{color:var(--color-text-muted);font-size:var(--font-size-metadata);line-height:var(--line-metadata)}
 
-.topbar{position:sticky;top:0;z-index:10;background:var(--color-surface);border-bottom:1px solid var(--color-border)}
-.topbar-inner{width:100%;max-width:var(--content-width);margin:0 auto;padding:var(--space-3) var(--space-4);display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:var(--space-4);min-width:0}
+.topbar{position:fixed;inset:0 auto 0 0;width:15rem;z-index:10;background:var(--color-surface-muted)}
+.topbar-inner{height:100%;padding:var(--space-5) var(--space-3);display:flex;flex-direction:column;align-items:stretch;gap:var(--space-6);min-width:0}
 .brand{display:flex;align-items:center;gap:var(--space-2);min-width:0}
-.brand .logo{width:1.5rem;height:1.5rem;color:var(--color-accent);flex:none}
+.brand .logo{width:2rem;height:2rem;color:var(--color-text);flex:none}
 .brand-copy{display:flex;flex-direction:column;min-width:0}
 .brand-name{font-size:var(--font-size-section);line-height:var(--line-section);font-weight:700;letter-spacing:-.01em}
 .brand .sub{color:var(--color-text-secondary);font-size:var(--font-size-metadata);line-height:var(--line-metadata);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tabs{display:inline-flex;justify-self:center;gap:var(--space-1);padding:var(--space-1);background:var(--color-surface-muted);border:1px solid var(--color-border);border-radius:var(--radius-md)}
+.tabs{display:flex;flex-direction:column;gap:var(--space-1)}
 .tabbtn{min-height:var(--control-height);cursor:pointer;font-size:var(--font-size-body);line-height:var(--line-body);color:var(--color-text-secondary);background:transparent;border:1px solid transparent;padding:0 var(--space-4);border-radius:var(--radius-sm);transition:background-color 180ms cubic-bezier(.16,1,.3,1),border-color 180ms cubic-bezier(.16,1,.3,1),color 180ms cubic-bezier(.16,1,.3,1),box-shadow 180ms cubic-bezier(.16,1,.3,1);white-space:nowrap}
 .tabbtn:hover{color:var(--color-text);background:var(--color-surface-hover)}
 .tabbtn:focus-visible{outline:3px solid var(--color-accent-soft);outline-offset:2px;border-color:var(--color-accent)}
 .tabbtn:active{background:var(--color-border)}
-.tabbtn.active{background:var(--color-surface);border-color:var(--color-border-strong);color:var(--color-text);font-weight:650;box-shadow:var(--shadow-control)}
-.chips{display:flex;justify-content:flex-end;gap:var(--space-2);align-items:center;min-width:0;flex-wrap:wrap}
+.tabbtn{text-align:left;border-radius:var(--radius-md);display:flex;align-items:center;gap:var(--space-3)}
+.nav-icon{width:1.125rem;height:1.125rem;flex:none}
+.tabbtn.active{background:var(--color-surface-hover);color:var(--color-text);font-weight:650}
+.chips{display:flex;gap:var(--space-2);align-items:center;min-width:0;flex-wrap:wrap;margin-top:auto;padding:var(--space-3) var(--space-2)}
 .chip{font:var(--font-size-metadata)/var(--line-metadata) var(--font-mono);color:var(--color-text-secondary);border:1px solid var(--color-border);background:var(--color-surface-muted);padding:var(--space-1) var(--space-2);border-radius:var(--radius-full);white-space:nowrap}
-.runtime-chip{color:var(--color-success);background:var(--color-success-soft);border-color:var(--color-success)}
+.runtime-chip{color:var(--color-text-secondary);background:transparent;border-color:transparent;width:100%;padding-left:0}
 .dot{display:inline-block;width:.5rem;height:.5rem;border-radius:50%;background:var(--color-text-muted);margin-right:var(--space-1);vertical-align:1px}
 .dot.on{background:var(--color-success)}
 
-main{width:100%;max-width:var(--content-width);margin:var(--space-6) auto var(--space-8);padding:0 var(--space-4);min-width:0}
+main{width:100%;max-width:var(--content-width);margin:4rem auto var(--space-8);padding:0 var(--space-6);min-width:0}
 .pane{display:flex;flex-direction:column;gap:var(--space-5);min-width:0}
-.pane-head{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-4);flex-wrap:wrap;min-width:0}
+.pane-head{display:flex;justify-content:space-between;align-items:center;gap:var(--space-4);flex-wrap:wrap;min-width:0;margin-bottom:var(--space-3)}
+.pane-description{margin:var(--space-2) 0 0;color:var(--color-text-secondary);line-height:1.6}
 .pane-head > *{min-width:0}
 .pane-head h2{margin:0;font-size:var(--font-size-title);line-height:var(--line-title);font-weight:720;letter-spacing:-.025em}
 .pane-actions{display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap}
@@ -317,23 +345,23 @@ main{width:100%;max-width:var(--content-width);margin:var(--space-6) auto var(--
 .btn.danger:hover{background:var(--color-error-soft);border-color:var(--color-error);color:var(--color-error)}
 .btn.small{min-height:2rem;font-size:var(--font-size-metadata);padding:0 var(--space-3)}
 
-.provider-summary{padding:var(--space-4);background:var(--color-surface-muted);border:1px solid var(--color-border);border-radius:var(--radius-lg)}
+.provider-summary{padding:0 0 var(--space-5);border-bottom:1px solid var(--color-border)}
 .union-bar{font-size:var(--font-size-body);line-height:var(--line-body)}
 .union-bar b{color:var(--color-accent)}
 .union-chips{display:flex;flex-wrap:wrap;gap:var(--space-2);margin-top:var(--space-3)}
 .mtag{display:inline-block;max-width:100%;font:var(--font-size-metadata)/var(--line-metadata) var(--font-mono);padding:var(--space-1) var(--space-2);border-radius:var(--radius-sm);background:var(--color-surface);border:1px solid var(--color-border);color:var(--color-text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-.provider-list{display:flex;flex-direction:column;overflow:hidden;background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-lg)}
+.provider-list{display:flex;flex-direction:column;overflow:hidden;background:var(--color-canvas)}
 .provider-list > .empty,.history-list > .empty{border:0;border-radius:0;background:transparent}
-.pcard{min-width:0;padding:var(--space-4) var(--space-5);display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:var(--space-5);row-gap:var(--space-2);background:var(--color-surface);border-bottom:1px solid var(--color-border);transition:background-color 180ms cubic-bezier(.16,1,.3,1),border-color 180ms cubic-bezier(.16,1,.3,1)}
+.pcard{min-width:0;padding:var(--space-5) 0;display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:var(--space-5);row-gap:var(--space-3);background:var(--color-canvas);border-bottom:1px solid var(--color-border)}
 .pcard:last-child{border-bottom:0}
-.pcard:hover{background:var(--color-surface-hover)}
-.pcard.off{background:var(--color-surface-muted);border-color:var(--color-border-strong)}
+.pcard:hover{background:var(--color-canvas)}
+.pcard.off{background:var(--color-canvas)}
 .pcard.off .dot{background:var(--color-text-muted)}
 .pcard-top{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);min-width:0}
 .pcard-id{display:flex;align-items:center;gap:var(--space-2);min-width:0}
 .pcard-id b{font-size:var(--font-size-section);line-height:var(--line-section);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pid{max-width:100%;font:var(--font-size-metadata)/var(--line-metadata) var(--font-mono);color:var(--color-text-secondary);background:var(--color-surface-muted);border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:0 var(--space-2);overflow-wrap:anywhere}
+.pid{max-width:100%;font:var(--font-size-metadata)/var(--line-metadata) var(--font-mono);color:var(--color-text-muted);overflow-wrap:anywhere}
 .pcard-row{grid-column:1;display:flex;align-items:baseline;gap:var(--space-2);font-size:var(--font-size-body);line-height:var(--line-body);min-width:0}
 .pcard-row .lbl{color:var(--color-text-muted);font-size:var(--font-size-metadata);line-height:var(--line-metadata);font-weight:650;text-transform:uppercase;letter-spacing:.06em;flex:none;width:4rem}
 .pcard-row .url{color:var(--color-text-secondary);min-width:0}
@@ -390,17 +418,17 @@ details[open] summary:before{transform:rotate(90deg)}
 pre{font-family:var(--font-mono);font-size:var(--font-size-metadata);line-height:var(--line-metadata);color:var(--color-text);background:var(--color-surface-muted);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:var(--space-4);overflow:auto;max-height:26.25rem;margin:var(--space-3) 0 0}
 
 #modalWrap{position:fixed;inset:0;z-index:50;background:var(--color-overlay);display:flex;align-items:center;justify-content:center;padding:var(--space-5);overflow:hidden}
-#modal{width:min(52rem,100%);max-height:calc(100dvh - 3rem);display:flex;flex-direction:column;overflow:hidden;background:var(--color-surface);border:1px solid var(--color-border-strong);border-radius:var(--radius-lg);box-shadow:var(--shadow-dialog)}
+#modal{width:min(46rem,100%);max-height:calc(100dvh - 3rem);display:flex;flex-direction:column;overflow:hidden;background:var(--color-surface);border:1px solid var(--color-border);border-radius:1.5rem;box-shadow:var(--shadow-dialog)}
 .modal-head{flex:none;display:flex;justify-content:space-between;align-items:center;gap:var(--space-3);min-height:3.5rem;padding:var(--space-3) var(--space-5);background:var(--color-surface);border-bottom:1px solid var(--color-border)}
-.modal-head b{min-width:0;font-size:var(--font-size-section);line-height:var(--line-section);overflow-wrap:anywhere}
-.modal-body{flex:1;min-height:0;overflow:auto;padding:var(--space-4) var(--space-5)}
+.modal-head b{min-width:0;font-size:1.25rem;line-height:1.75rem;overflow-wrap:anywhere}
+.modal-body{flex:1;min-height:0;overflow:auto;padding:var(--space-4) var(--space-6)}
 .modal-foot{flex:none;display:flex;justify-content:flex-end;gap:var(--space-2);margin:0;padding:var(--space-3) var(--space-5);background:var(--color-surface);border-top:1px solid var(--color-border)}
 .xbtn{width:var(--control-height);min-height:var(--control-height);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;background:transparent;border:1px solid var(--color-border-strong);color:var(--color-text-secondary);font-size:var(--font-size-section);padding:0;border-radius:var(--radius-md)}
 .xbtn:hover{color:var(--color-text);background:var(--color-surface-hover);border-color:var(--color-accent)}
 .xbtn:focus-visible{outline:3px solid var(--color-accent-soft);outline-offset:2px;border-color:var(--color-accent)}
 .xbtn:active{background:var(--color-border)}
 .xbtn:disabled{cursor:not-allowed;color:var(--color-text-muted);background:var(--color-surface-muted)}
-.frow{min-width:0;margin:var(--space-3) 0}
+.frow{min-width:0;margin:var(--space-4) 0}
 .frow > label{display:block;font-size:var(--font-size-metadata);line-height:var(--line-metadata);font-weight:650;color:var(--color-text-secondary);margin-bottom:var(--space-1);text-transform:uppercase;letter-spacing:.06em}
 .frow input,.frow select,.frow textarea{width:100%;min-width:0;min-height:var(--control-height);background:var(--color-surface);color:var(--color-text);border:1px solid var(--color-border-strong);border-radius:var(--radius-md);padding:var(--space-2) var(--space-3);font-size:var(--font-size-body);line-height:var(--line-body);box-shadow:var(--shadow-control);transition:background-color 180ms cubic-bezier(.16,1,.3,1),border-color 180ms cubic-bezier(.16,1,.3,1),box-shadow 180ms cubic-bezier(.16,1,.3,1)}
 .frow input:hover,.frow select:hover,.frow textarea:hover{border-color:var(--color-accent)}
@@ -441,11 +469,22 @@ label.ck input{width:1rem;height:1rem;min-height:0;flex:none;accent-color:var(--
 .field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 var(--space-4)}
 .discovery-line{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;margin-top:var(--space-2)}
 .api-key-list{display:grid;gap:var(--space-2)}
-.saved-key-list{display:grid;gap:var(--space-1);margin-bottom:var(--space-2)}
-.saved-key-list label{display:flex;align-items:center;gap:var(--space-2);text-transform:none;color:var(--color-text)}
+.saved-key-list{display:grid;margin:var(--space-2) 0 var(--space-3);border:1px solid var(--color-border);border-radius:var(--radius-md);overflow:hidden}
+.saved-key-list:empty{display:none}
+.saved-key-row{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3);min-width:0;background:var(--color-surface-muted)}
+.saved-key-row + .saved-key-row{border-top:1px solid var(--color-border)}
+.saved-key-copy{flex:1;min-width:0;display:grid;gap:var(--space-1)}
+.saved-key-copy .mono{overflow-wrap:anywhere;font-size:var(--font-size-body)}
+.saved-key-row.pending .saved-key-copy .mono{text-decoration:line-through;color:var(--color-text-muted)}
+.saved-key-row.pending{background:var(--color-error-soft)}
+.saved-key-row .btn{flex:none}
+.key-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);margin-bottom:var(--space-2)}
+.key-heading label{font-weight:650}.key-heading .hint{font-size:var(--font-size-metadata)}
+#f-apikey-wrap{padding:var(--space-5) 0;margin:var(--space-4) 0;border-top:1px solid var(--color-border);border-bottom:1px solid var(--color-border)}
+#addApiKey{margin-top:var(--space-2)}
 .discovery-status{flex:1;min-width:0;margin:0;padding:var(--space-2) var(--space-3);border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface-muted);overflow-wrap:anywhere}
 .discovery-status.valid{color:var(--color-success);border-color:var(--color-success);background:var(--color-success-soft)}
-.discovery-status.loading,.discovery-status.unverified,.discovery-status.rate_limited,.discovery-status.forbidden{color:var(--color-warning);border-color:var(--color-warning);background:var(--color-warning-soft)}
+.discovery-status.loading,.discovery-status.rate_limited,.discovery-status.forbidden{color:var(--color-warning);border-color:var(--color-warning);background:var(--color-warning-soft)}
 .discovery-status.invalid,.discovery-status.unsupported,.discovery-status.unreachable{color:var(--color-error);border-color:var(--color-error);background:var(--color-error-soft)}
 .selected-models{display:flex;flex-wrap:wrap;gap:var(--space-2);min-height:var(--control-height);margin:var(--space-2) 0}
 .selected-model{display:inline-flex;align-items:center;gap:var(--space-1);max-width:100%;padding:var(--space-1) var(--space-1) var(--space-1) var(--space-2);border:1px solid var(--color-accent);border-radius:var(--radius-full);background:var(--color-accent-soft);color:var(--color-accent-hover);font:var(--font-size-metadata)/var(--line-metadata) var(--font-mono)}
@@ -470,9 +509,12 @@ label.ck input{width:1rem;height:1rem;min-height:0;flex:none;accent-color:var(--
 
 footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var(--space-6);color:var(--color-text-secondary);font-size:var(--font-size-metadata);line-height:var(--line-metadata);display:flex;gap:var(--space-5);justify-content:center;flex-wrap:wrap}
 @media(max-width:860px){
-  .topbar-inner{grid-template-columns:minmax(0,1fr) auto}
-  .tabs{grid-column:1/-1;grid-row:2;width:100%;justify-content:center}
-  .chips{justify-content:flex-end}
+  body{padding-left:0}
+  .topbar{position:relative;inset:auto;width:100%}
+  .topbar-inner{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--space-3);padding:var(--space-3) var(--space-5)}
+  .tabs{flex-direction:row;grid-column:2;grid-row:1}
+  .chips{display:none}
+  main{margin-top:var(--space-6)}
   #backupList ul{columns:1}
   .form-grid,.field-grid{grid-template-columns:1fr}
   .form-span{grid-column:auto}
@@ -483,12 +525,12 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
   .brand{grid-row:1}
   .tabs{grid-column:1;grid-row:2}
   .tabbtn{flex:1;padding:0 var(--space-2)}
-  .chips{grid-row:3;justify-content:flex-start}
+  .chips{display:none}
   main{padding:0 var(--space-3);margin:var(--space-5) auto var(--space-6)}
   .pane-head{align-items:stretch}
   .pane-actions{width:100%}
   .pane-actions .btn{flex:1}
-  .provider-summary{padding:var(--space-3)}
+  .provider-summary{padding:0 0 var(--space-4)}
   .pcard{grid-template-columns:minmax(0,1fr);padding:var(--space-4) var(--space-3)}
   .pcard-actions{grid-column:1;grid-row:auto;align-self:auto;justify-content:flex-start;padding-top:var(--space-2);border-top:1px solid var(--color-border);flex-wrap:wrap}
   .pcard-actions .btn{flex:1}
@@ -528,11 +570,11 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
   <div class="topbar-inner">
     <div class="brand">
       <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="12" r="1.9" fill="currentColor" stroke="none"/><path d="M6.5 12h4"/><path d="M10.5 12c3.2 0 3.6-4.5 6.8-4.5"/><path d="M10.5 12c3.2 0 3.6 4.5 6.8 4.5"/><path d="M17.3 4.6 21 7.5l-3.7 2.9"/><path d="M17.3 13.6 21 16.5l-3.7 2.9"/></svg>
-      <span class="brand-copy"><span class="brand-name">codex-switch</span><span class="sub">多供应商模型路由</span></span>
+      <span class="brand-copy"><span class="brand-name">Codex Switch</span><span class="sub">本地模型工作空间</span></span>
     </div>
-    <nav id="managementTabs" class="tabs" role="tablist" aria-label="管理页面" aria-orientation="horizontal">
-      <button id="tabbtn-providers" class="tabbtn active" role="tab" aria-selected="true" aria-controls="tab-providers" tabindex="0" onclick="switchTab('providers')">供应商</button>
-      <button id="tabbtn-history" class="tabbtn" role="tab" aria-selected="false" aria-controls="tab-history" tabindex="-1" onclick="switchTab('history')">配置历史</button>
+    <nav id="managementTabs" class="tabs" role="tablist" aria-label="管理页面" aria-orientation="vertical">
+      <button id="tabbtn-providers" class="tabbtn active" role="tab" aria-selected="true" aria-controls="tab-providers" tabindex="0" onclick="switchTab('providers')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg>供应商</button>
+      <button id="tabbtn-history" class="tabbtn" role="tab" aria-selected="false" aria-controls="tab-history" tabindex="-1" onclick="switchTab('history')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.6 7M3 4v7h7M12 7v5l3 2"/></svg>配置历史</button>
     </nav>
     <div class="chips" aria-label="运行状态">
       <span class="chip runtime-chip"><span class="dot on"></span>运行中</span>
@@ -548,6 +590,7 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
     <div class="pane-head">
       <div>
         <h2>供应商</h2>
+        <p class="pane-description">连接你的模型，管理每一把 Key。</p>
       </div>
       <div class="pane-actions">
         <button class="btn" onclick="refreshCaps()">刷新模型能力</button>
@@ -559,7 +602,7 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
       <div id="unionChips" class="union-chips"><span class="hint">加载中…</span></div>
     </div>
     <div id="providerGrid" class="provider-list" role="list"></div>
-    <p class="note">Codex 看到的模型 = 所有「启用」供应商的模型并集。停用供应商不会删除它,只是从路由表和并集中移除。API Key 在供应商「编辑」里直接填写(存本机 <span class="mono">~/.codex-switch/env</span>,chmod 600,保存即生效);供应商配置文件里只存环境变量名,不出现明文。</p>
+    <p class="note">只路由已启用供应商的模型。Key 安全保存在本机，配置修改保存即生效。</p>
   </section>
 
   <section id="tab-history" class="pane" role="tabpanel" aria-labelledby="tabbtn-history" style="display:none">
@@ -588,27 +631,21 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
   </section>
 
 </main>
-<footer><span>零请求改写</span><span>只监听 127.0.0.1</span><span>纯配置驱动</span><span>MIT</span></footer>
+<footer><span>本机运行 · 凭据不上传 · 请求原样转发</span></footer>
 
 <div id="modalWrap" style="display:none">
   <div id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
     <div class="modal-head"><b id="modalTitle">添加供应商</b><button class="xbtn" type="button" aria-label="关闭供应商设置" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
-    <details class="advdet" id="importWrap"><summary>从 JSON 导入(粘贴其他机器「复制」得到的配置)</summary>
-      <div class="frow"><label for="f-import">配置 JSON</label><textarea id="f-import" rows="5" class="mono" placeholder="粘贴从其他机器「复制」得到的供应商元数据 JSON" spellcheck="false"></textarea>
-      <div class="fhint">导入只填充非敏感元数据；API Key 必须在本机重新输入后再保存。</div>
-      <button class="btn small" type="button" onclick="importJson()">解析并填充表单</button></div>
-    </details>
     <div class="form-grid">
       <div class="frow form-span">
-        <label for="providerSearch">1 · 选择厂商</label>
+        <label for="providerSearch">供应商</label>
         <div class="combo">
           <input id="providerSearch" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="providerListbox" aria-activedescendant="" autocomplete="off" placeholder="搜索 OpenAI、百炼、Kimi、Custom…">
           <div id="providerListbox" class="listbox" role="listbox" aria-label="厂商列表" hidden></div>
         </div>
       </div>
       <div class="frow form-span">
-        <label>2 · Responses 兼容性</label>
         <div id="providerCompatibility" class="compat unverified" aria-live="polite">
           <span class="compat-icon" aria-hidden="true">?</span><div><strong>尚未选择厂商</strong><p>先搜索并选择一个厂商，再配置连接。</p></div>
         </div>
@@ -616,6 +653,7 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
       </div>
     </div>
     <div id="routableSetup" hidden>
+      <details id="connectionDetails"><summary>连接设置 · 名称、区域与 URL</summary>
       <div class="field-grid" id="connectionFields"></div>
       <div class="form-grid">
         <div class="frow">
@@ -623,29 +661,31 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
         </div>
         <div class="frow">
           <label for="f-baseurl">路由 URL</label><input id="f-baseurl" class="mono" placeholder="https://…" spellcheck="false" readonly aria-describedby="f-baseurl-hint">
-          <div class="fhint" id="f-baseurl-hint">固定和派生 URL 只读，保存时服务端会再次权威计算；Custom 可直接编辑。</div>
+          <div class="fhint" id="f-baseurl-hint">地址由厂商自动生成；自定义供应商可编辑。</div>
         </div>
       </div>
-      <div class="frow" id="f-apikey-wrap"><label for="f-apikey">3 · API Key</label>
+      </details>
+      <div class="frow" id="f-apikey-wrap">
+        <div class="key-heading"><label for="f-apikey">API Keys</label><span class="hint">随机选用 · 会话内固定</span></div>
         <div id="savedApiKeyList" class="saved-key-list" aria-label="已保存的 Key"></div>
         <div id="apiKeyList" class="api-key-list">
-          <input id="f-apikey" type="password" class="mono api-key-input" placeholder="API Key 1" autocomplete="new-password" spellcheck="false" aria-describedby="f-apikey-hint discoveryStatus">
+          <input id="f-apikey" type="password" class="mono api-key-input" placeholder="粘贴新的 API Key" autocomplete="new-password" spellcheck="false" aria-describedby="f-apikey-hint discoveryStatus">
         </div>
-        <button class="btn small" id="addApiKey" type="button">添加 Key</button>
-        <div class="fhint" id="f-apikey-hint">每行一个 Key；仅第一把用于连接检测。保存到 ~/.codex-switch/env(chmod 600)，不回显、不进 URL、不写日志。</div>
+        <button class="btn small" id="addApiKey" type="button">＋ 再添加一把</button>
+        <div class="fhint" id="f-apikey-hint">每行一把 Key，保存后生效。仅第一把用于连接检测。</div>
         <div class="discovery-line">
           <button class="btn small" id="detectProvider" type="button">立即检测</button>
-          <div id="discoveryStatus" class="discovery-status unverified" role="status" aria-live="polite">? 未验证 · 输入 Key 停顿 700 ms 后自动检测，也可立即检测。</div>
+          <div id="discoveryStatus" class="discovery-status unverified" role="status" aria-live="polite">? 未验证 · 输入 Key 后自动检测，也可手动检测。</div>
         </div>
       </div>
       <div class="frow">
-        <label for="modelSearch">4 · 搜索并选择模型</label>
+        <label for="modelSearch">模型</label>
         <div id="selectedModels" class="selected-models" aria-live="polite"><span class="hint">尚未选择模型</span></div>
         <div class="combo">
           <input id="modelSearch" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="modelListbox" aria-activedescendant="" autocomplete="off" placeholder="搜索模型 ID 或名称">
           <div id="modelListbox" class="listbox model-listbox" role="listbox" aria-label="模型列表" aria-multiselectable="true" hidden></div>
         </div>
-        <div class="fhint">能力徽标使用 ✓ / × / ? 三态，并标注 API、静态、未知或手动来源。刷新不会静默删除已选模型。</div>
+        <div class="fhint">选择要在 Codex 中使用的模型，也可手动添加。</div>
       </div>
       <div class="frow">
         <label for="manualModelId">手动添加模型 / Deployment ID</label>
@@ -653,7 +693,7 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
       </div>
     </div>
     <div class="frow"><label class="ck"><input type="checkbox" id="f-enabled" checked> 启用该供应商</label></div>
-    <details class="advdet"><summary>高级选项(ID / 认证方式 / 环境变量名,一般不用动)</summary>
+    <details class="advdet"><summary>高级选项</summary>
       <div class="frow"><label for="f-id">ID</label><input id="f-id" class="mono" placeholder="留空 = 按名称自动生成" spellcheck="false"></div>
       <div class="frow"><label for="f-auth">认证方式</label>
         <select id="f-auth" onchange="authChanged()">
@@ -667,6 +707,11 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
         <input id="f-tokenenv" class="mono" placeholder="留空 = 使用厂商默认值或 <ID>_API_KEY" spellcheck="false">
         <div class="fhint">配置文件里只存这个变量名,不出现明文 Key。</div>
       </div>
+    </details>
+    <details class="advdet" id="importWrap"><summary>导入已有配置</summary>
+      <div class="frow"><label for="f-import">配置 JSON</label><textarea id="f-import" rows="5" class="mono" placeholder="粘贴从其他机器「复制」得到的供应商元数据 JSON" spellcheck="false"></textarea>
+      <div class="fhint">导入只填充非敏感元数据；API Key 必须在本机重新输入后再保存。</div>
+      <button class="btn small" type="button" onclick="importJson()">解析并填充表单</button></div>
     </details>
     <div id="formMsg" class="status" role="status" aria-live="polite"></div>
     </div>
@@ -758,6 +803,12 @@ function handleTabKeydown(event){
   buttons[nextIndex].click();
 }
 $('managementTabs').addEventListener('keydown',handleTabKeydown);
+var compactNavigation=window.matchMedia('(max-width:860px)');
+function updateNavigationOrientation(){
+  $('managementTabs').setAttribute('aria-orientation',compactNavigation.matches?'horizontal':'vertical');
+}
+compactNavigation.addEventListener('change',updateNavigationOrientation);
+updateNavigationOrientation();
 
 /* ---------- 供应商 ---------- */
 function loadProviders(){
@@ -1066,6 +1117,7 @@ function initialOptions(preset,existing){
   return options;
 }
 function selectPreset(preset,existing,userDriven){
+  if(userDriven)$('connectionDetails').open=true;
   abortDiscovery();
   var previous=SELECTED_PRESET||SEARCH_ORIGIN_PRESET;
   var sameSelection=!!(previous&&previous.id===preset.id);
@@ -1094,7 +1146,7 @@ function selectPreset(preset,existing,userDriven){
   renderConnectionFields();
   updateBaseUrl(false);
   authChanged(false);
-  invalidateDiscovery(true,'尚未验证 · 输入 Key 停顿 700 ms 后自动检测，也可立即检测。');
+  invalidateDiscovery(true,'输入 Key 后自动检测，也可手动检测。');
   renderSelectedModels();
   renderModelList();
   if(preset.routable&&(HAS_SAVED_KEY||STATIC_UNVERIFIED[preset.id]))scheduleDiscoveryIfReady();
@@ -1134,24 +1186,37 @@ function resetApiKeyFields(savedKeys){
   HAS_SAVED_KEY=SAVED_API_KEYS.length>0;
   var savedList=$('savedApiKeyList');
   clearNode(savedList);
-  SAVED_API_KEYS.forEach(function(key){
-    var label=document.createElement('label');
-    var checkbox=document.createElement('input');
-    checkbox.type='checkbox';checkbox.className='saved-api-key-delete';checkbox.value=key.id;
-    label.appendChild(checkbox);
-    label.appendChild(element('span','mono',key.masked));
-    label.appendChild(element('span','hint','删除'));
-    savedList.appendChild(label);
+  SAVED_API_KEYS.forEach(function(key,index){
+    var row=element('div','saved-key-row');
+    var copy=element('div','saved-key-copy');
+    copy.appendChild(element('span','mono',key.masked));
+    var status=element('span','hint','Key '+(index+1)+' · 已保存');
+    copy.appendChild(status);row.appendChild(copy);
+    var button=element('button','btn small danger saved-api-key-delete','删除');
+    button.type='button';button.value=key.id;
+    button.setAttribute('aria-pressed','false');
+    button.setAttribute('aria-label','删除 Key '+(index+1));
+    button.addEventListener('click',function(){
+      var pending=button.getAttribute('aria-pressed')!=='true';
+      button.setAttribute('aria-pressed',String(pending));
+      button.setAttribute('aria-label',(pending?'撤销删除':'删除')+' Key '+(index+1));
+      button.textContent=pending?'撤销':'删除';
+      row.classList.toggle('pending',pending);
+      status.textContent='Key '+(index+1)+(pending?' · 待删除，保存后生效':' · 已保存');
+      invalidateDiscovery(true,'Key 已变化，请重新检测。');
+      scheduleDiscoveryIfReady();
+    });
+    row.appendChild(button);savedList.appendChild(row);
   });
   var inputs=$('apiKeyList').querySelectorAll('.api-key-input');
   for(var index=inputs.length-1;index>0;index--)inputs[index].remove();
   $('f-apikey').value='';
   $('f-apikey-hint').textContent=HAS_SAVED_KEY
-    ?'上方是当前保存的脱敏 Key；可勾选删除，也可在下方直接追加。'
-    :'每行一个 Key；仅第一把用于连接检测。保存到 ~/.codex-switch/env(chmod 600)，不回显、不进 URL、不写日志。';
+    ?'留空保留已有 Key。添加和删除均在保存后生效。'
+    :'每行一把 Key，保存后生效。仅第一把用于连接检测。';
 }
 function selectedApiKeyIds(){
-  return Array.prototype.map.call($('savedApiKeyList').querySelectorAll('.saved-api-key-delete:checked'),function(input){return input.value;});
+  return Array.prototype.map.call($('savedApiKeyList').querySelectorAll('.saved-api-key-delete[aria-pressed="true"]'),function(button){return button.value;});
 }
 function hasUsableSavedApiKey(){return HAS_SAVED_KEY&&selectedApiKeyIds().length<SAVED_API_KEYS.length;}
 function enteredApiKeys(){
@@ -1168,6 +1233,7 @@ function apiKeyBlurred(){
 function addApiKeyInput(){
   var input=document.createElement('input');
   input.type='password';input.className='mono api-key-input';input.placeholder='API Key '+($('apiKeyList').children.length+1);
+  input.setAttribute('aria-label',input.placeholder);
   input.autocomplete='new-password';input.spellcheck=false;
   input.addEventListener('input',apiKeyChanged);input.addEventListener('blur',apiKeyBlurred);
   $('apiKeyList').appendChild(input);input.focus();
@@ -1445,7 +1511,10 @@ function moveModelActive(delta){
 function showModal(){
   PREVIOUS_FOCUS=document.activeElement;
   $('modalWrap').style.display='flex';
-  $('providerSearch').focus();
+  $('connectionDetails').open=EDITING===null;
+  document.querySelector('.modal-body').scrollTop=0;
+  if(EDITING===null)$('providerSearch').focus();
+  else document.querySelector('.modal-head .xbtn').focus({preventScroll:true});
 }
 function resetModalState(){
   abortDiscovery();
@@ -1478,7 +1547,7 @@ function resetModalState(){
   $('routableSetup').hidden=true;
   $('useOpenRouter').hidden=true;
   resetApiKeyFields(false);
-  setDiscoveryStatus('unverified','输入 Key 停顿 700 ms 后自动检测，也可立即检测。');
+  setDiscoveryStatus('unverified','输入 Key 后自动检测，也可手动检测。');
   setMsg('');
   renderSelectedModels();
   renderModelList();
@@ -1564,11 +1633,11 @@ function allowUnverifiedSave(){
 }
 function saveProvider(){
   var name=$('f-name').value.trim();
-  if(!name){setMsg('名称不能为空。',false);$('f-name').focus();return;}
+  if(!name){$('connectionDetails').open=true;setMsg('名称不能为空。',false);$('f-name').focus();return;}
   if(!SELECTED_PRESET){setMsg('请先从列表选择厂商。',false);$('providerSearch').focus();return;}
   updateBaseUrl(false);
   var baseUrl=$('f-baseurl').value.trim();
-  if(!baseUrl&&SELECTED_PRESET.routable){setMsg('请补全连接字段或 URL。',false);return;}
+  if(!baseUrl&&SELECTED_PRESET.routable){$('connectionDetails').open=true;setMsg('请补全连接字段或 URL。',false);$('f-baseurl').focus();return;}
   var id=$('f-id').value.trim()||autoId(name);
   var tokenEnv=$('f-tokenenv').value.trim();
   var auth=$('f-auth').value;
@@ -1650,10 +1719,6 @@ $('f-baseurl').addEventListener('input',function(){
 $('f-apikey').addEventListener('input',apiKeyChanged);
 $('f-apikey').addEventListener('blur',apiKeyBlurred);
 $('addApiKey').addEventListener('click',addApiKeyInput);
-$('savedApiKeyList').addEventListener('change',function(){
-  invalidateDiscovery(true,'Key 列表已变化，请重新检测。');
-  scheduleDiscoveryIfReady();
-});
 $('detectProvider').addEventListener('click',requestDiscovery);
 $('addManualModel').addEventListener('click',addManualModel);
 $('manualModelId').addEventListener('keydown',function(event){if(event.key==='Enter'){event.preventDefault();addManualModel();}});

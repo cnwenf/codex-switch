@@ -9,6 +9,20 @@ import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
+test('native settings window follows system appearance and keeps service ownership separate', () => {
+  const launcher = fs.readFileSync(path.join(REPO_ROOT, 'assets/launcher/CodexSwitchLauncher.swift'), 'utf8');
+  const menubar = fs.readFileSync(path.join(REPO_ROOT, 'assets/menubar/CodexSwitchMenuBar.swift'), 'utf8');
+  assert.match(launcher, /WKWebView\(frame: \.zero\)/);
+  assert.match(launcher, /windowController\.show\(\)/);
+  assert.doesNotMatch(launcher, /panel\.appearance\s*=/);
+  assert.match(launcher, /guard serverChild != nil else \{ return \}/);
+  assert.match(launcher, /applicationShouldTerminateAfterLastWindowClosed[^\n]*false/);
+  assert.match(launcher, /runJavaScriptConfirmPanelWithMessage/);
+  assert.match(launcher, /url\.host == "127\.0\.0\.1", url\.port == Int\(port\)/);
+  assert.match(menubar, /CodexSwitchOpenSettings/);
+  assert.doesNotMatch(menubar, /NSWorkspace\.shared\.open/);
+});
+
 function writeExecutable(target, contents) {
   fs.writeFileSync(target, contents, { mode: 0o755 });
 }
@@ -144,7 +158,7 @@ test('packaged server launcher preserves positional paths and inherited CA while
   assert.equal(fs.existsSync(path.join(root, 'PWNED_TICK')), false);
 });
 
-test('build-generated shell fallback uses native system CA and packages no CA generator', (t) => {
+test('app build fails closed without Swift instead of shipping a browser-only fallback', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-switch-build-launcher-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const project = path.join(root, "project ' newline\nbackslash \\ $(touch PWNED_BUILD) `touch PWNED_TICK`");
@@ -214,28 +228,9 @@ done
     encoding: 'utf8',
     timeout: 30_000,
   });
-  assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
-
-  const launcher = path.join(captureApp, 'Contents', 'MacOS', 'codex-switch-launcher');
-  const packagedNode = path.join(captureApp, 'Contents', 'MacOS', 'node');
-  const appResources = path.join(captureApp, 'Contents', 'Resources', 'app');
-  const serverJs = `${path.dirname(packagedNode)}/../Resources/app/src/server.js`;
-  assert.equal(fs.existsSync(path.join(appResources, 'scripts', 'prepare-ca.sh')), false);
-  const launch = spawnSync('/bin/sh', [launcher], {
-    cwd: project,
-    env: {
-      HOME: home,
-      PATH: bin,
-      NODE_EXTRA_CA_CERTS: inheritedCA,
-      LAUNCH_CAPTURE: launchOutput,
-    },
-    encoding: 'utf8',
-    timeout: 10_000,
-  });
-  assert.equal(launch.status, 0, `${launch.stdout}\n${launch.stderr}`);
-  assert.deepEqual(readNullFields(launchOutput), [
-    'x', inheritedCA, '', packagedNode, '--use-system-ca', serverJs,
-  ]);
+  assert.equal(build.status, 1, `${build.stdout}\n${build.stderr}`);
+  assert.match(build.stderr, /原生 App 需要 swiftc/);
+  assert.equal(fs.existsSync(captureApp), false);
   assert.deepEqual(findCAArtifacts(home), []);
   assert.equal(fs.existsSync(path.join(project, 'PWNED_BUILD')), false);
   assert.equal(fs.existsSync(path.join(project, 'PWNED_TICK')), false);

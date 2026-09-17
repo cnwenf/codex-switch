@@ -146,7 +146,9 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
   }
 
   @objc private func openPage() {
-    if let url = URL(string: baseURL + "/") { NSWorkspace.shared.open(url) }
+    guard let pid = launcherPid else { return }
+    DistributedNotificationCenter.default().postNotificationName(
+      Notification.Name("CodexSwitchOpenSettings"), object: String(pid), userInfo: nil, deliverImmediately: true)
   }
 
   @objc private func hideIcon() { NSApp.terminate(nil) }
@@ -207,7 +209,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
       DispatchQueue.main.async {
         if err != nil {
           // 更新流水线可能已重启服务导致连接中断;打开配置页看进度即可
-          if let u = URL(string: baseURL + "/") { NSWorkspace.shared.open(u) }
+          self.openPage()
           return
         }
         var failedWith: String?
@@ -224,7 +226,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
           a.addButton(withTitle: "好")
           a.runModal()
         } else {
-          if let u = URL(string: baseURL + "/") { NSWorkspace.shared.open(u) }  // 去配置页看下载进度条
+          self.openPage()
         }
       }
     }.resume()
