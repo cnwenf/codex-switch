@@ -449,6 +449,59 @@ test('shared app-bundle installer stages and atomically replaces a validated des
   );
 });
 
+test('shared app-bundle installer preserves the existing provider config across upgrades', (t) => {
+  const installAppBundle = loadAppBundleInstaller();
+  const fixture = createBundleSwapFixture(t);
+  const relativeConfig = path.join('Contents', 'Resources', 'app', 'config.toml');
+  const sourceConfig = path.join(fixture.sourceApp, relativeConfig);
+  const destinationConfig = path.join(fixture.destination, relativeConfig);
+  fs.mkdirSync(path.dirname(sourceConfig), { recursive: true });
+  fs.mkdirSync(path.dirname(destinationConfig), { recursive: true });
+  fs.writeFileSync(sourceConfig, '[[providers]]\nid = "chatgpt-sub"\n');
+  fs.writeFileSync(destinationConfig, '[[providers]]\nid = "bailian"\n', { mode: 0o600 });
+
+  installAppBundle(fixture);
+
+  assert.equal(fs.readFileSync(path.join(fixture.destination, 'version'), 'utf8'), 'new');
+  assert.equal(fs.readFileSync(destinationConfig, 'utf8'), '[[providers]]\nid = "bailian"\n');
+  assert.equal(fs.statSync(destinationConfig).mode & 0o777, 0o600);
+});
+
+test('shared app-bundle installer leaves the live app untouched when config migration fails', (t) => {
+  const installAppBundle = loadAppBundleInstaller();
+  const fixture = createBundleSwapFixture(t);
+  const relativeConfig = path.join('Contents', 'Resources', 'app', 'config.toml');
+  const sourceConfig = path.join(fixture.sourceApp, relativeConfig);
+  const destinationConfig = path.join(fixture.destination, relativeConfig);
+  fs.mkdirSync(path.dirname(sourceConfig), { recursive: true });
+  fs.mkdirSync(path.dirname(destinationConfig), { recursive: true });
+  fs.writeFileSync(sourceConfig, 'new config');
+  fs.writeFileSync(destinationConfig, 'old config');
+  const failingFs = { ...fs, copyFileSync() { throw new Error('fixture config migration failure'); } };
+
+  assert.throws(() => installAppBundle({ ...fixture, fsImpl: failingFs }), /config migration failure/);
+  assert.equal(fs.readFileSync(path.join(fixture.destination, 'version'), 'utf8'), 'old');
+  assert.equal(fs.readFileSync(destinationConfig, 'utf8'), 'old config');
+});
+
+test('shared app-bundle installer refuses symlinked provider configs', (t) => {
+  const installAppBundle = loadAppBundleInstaller();
+  const fixture = createBundleSwapFixture(t);
+  const relativeConfig = path.join('Contents', 'Resources', 'app', 'config.toml');
+  const sourceConfig = path.join(fixture.sourceApp, relativeConfig);
+  const destinationConfig = path.join(fixture.destination, relativeConfig);
+  const externalConfig = path.join(fixture.root, 'external-config.toml');
+  fs.mkdirSync(path.dirname(sourceConfig), { recursive: true });
+  fs.mkdirSync(path.dirname(destinationConfig), { recursive: true });
+  fs.writeFileSync(sourceConfig, 'new config');
+  fs.writeFileSync(externalConfig, 'external config');
+  fs.symlinkSync(externalConfig, destinationConfig);
+
+  assert.throws(() => installAppBundle(fixture), /existing provider config must be a real file/);
+  assert.equal(fs.readFileSync(path.join(fixture.destination, 'version'), 'utf8'), 'old');
+  assert.equal(fs.readFileSync(externalConfig, 'utf8'), 'external config');
+});
+
 test('shared app-bundle installer preserves the live app when staging copy fails', (t) => {
   const installAppBundle = loadAppBundleInstaller();
   const fixture = createBundleSwapFixture(t);

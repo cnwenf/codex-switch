@@ -263,6 +263,7 @@ test('provider export, raw config projection, and list responses never return le
   }
   const exported = await fetch(`${app.origin}/__admin/providers/export?id=legacy-inline`).then((response) => response.json());
   assert.equal(Object.hasOwn(exported.provider, 'api_key'), false);
+  assert.equal(Object.hasOwn(exported.provider, 'api_keys'), false);
   assert.equal(Object.hasOwn(exported.provider, 'token'), false);
   assert.equal(app.output().includes(secret), false);
 });
@@ -784,6 +785,88 @@ test('multiple provider keys are random across sessions and sticky within one pr
   const listed = await fetch(`${app.origin}/__admin/providers`).then((result) => result.text());
   assert.equal(keys.some((key) => listed.includes(key)), false);
   assert.equal(keys.some((key) => app.output().includes(key)), false);
+});
+
+test('provider list masks saved keys and reduces visible characters for short keys', async (t) => {
+  const keys = ['a', 'abcd', 'abcdefg', 'sk-fixture-1234567890'];
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'masked-custom',
+      providerType: 'custom',
+      tokenEnv: 'MASKED_CUSTOM_KEYS',
+      enabled: false,
+    }],
+    childEnv: { MASKED_CUSTOM_KEYS: JSON.stringify(keys) },
+  });
+
+  const response = await fetch(`${app.origin}/__admin/providers`);
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(body.includes(keys.at(-1)), false);
+  const listed = JSON.parse(body).providers.find((provider) => provider.id === 'masked-custom').api_keys;
+  assert.deepEqual(listed.map((key) => key.masked), ['…', 'a…d', 'ab…fg', 'sk-f…7890']);
+  assert.equal(listed.every((key) => /^[a-f0-9]{64}$/.test(key.id)), true);
+  assert.equal(new Set(listed.map((key) => key.id)).size, keys.length);
+});
+
+test('editing a provider appends new keys and deletes saved keys by opaque id', async (t) => {
+  const oldKey = 'sk-old-1234567890';
+  const newKey = 'sk-new-0987654321';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'managed-keys',
+      providerType: 'custom',
+      tokenEnv: 'MANAGED_CUSTOM_KEYS',
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+    childEnv: { MANAGED_CUSTOM_KEYS: oldKey },
+  });
+  const provider = {
+    id: 'managed-keys',
+    name: 'managed-keys',
+    provider_type: 'custom',
+    provider_options: { base_url: `${app.upstreamOrigin}/v1` },
+    base_url: `${app.upstreamOrigin}/v1`,
+    auth: 'bearer',
+    token_env: 'MANAGED_CUSTOM_KEYS',
+    models: ['fixture-model'],
+    enabled: false,
+  };
+
+  const appended = await postJson(app.origin, '/__admin/providers/update', {
+    origId: provider.id,
+    provider: { ...provider, api_keys: [newKey] },
+  });
+  assert.equal(appended.status, 200);
+  let listedResponse = await fetch(`${app.origin}/__admin/providers`);
+  let listedText = await listedResponse.text();
+  assert.equal(listedText.includes(oldKey) || listedText.includes(newKey), false);
+  let listed = JSON.parse(listedText).providers.find((entry) => entry.id === provider.id).api_keys;
+  assert.deepEqual(listed.map((key) => key.masked), ['sk-o…7890', 'sk-n…4321']);
+  assertSourcedEnvValue(path.join(app.home, '.codex-switch', 'env'), 'MANAGED_CUSTOM_KEYS', JSON.stringify([oldKey, newKey]));
+
+  const removedOld = await postJson(app.origin, '/__admin/providers/update', {
+    origId: provider.id,
+    provider: { ...provider, delete_api_key_ids: [listed[0].id] },
+  });
+  assert.equal(removedOld.status, 200);
+  listed = (await fetch(`${app.origin}/__admin/providers`).then((response) => response.json()))
+    .providers.find((entry) => entry.id === provider.id).api_keys;
+  assert.deepEqual(listed.map((key) => key.masked), ['sk-n…4321']);
+  assertSourcedEnvValue(path.join(app.home, '.codex-switch', 'env'), 'MANAGED_CUSTOM_KEYS', newKey);
+
+  const removedLast = await postJson(app.origin, '/__admin/providers/update', {
+    origId: provider.id,
+    provider: { ...provider, delete_api_key_ids: [listed[0].id] },
+  });
+  assert.equal(removedLast.status, 200);
+  const finalPayload = await fetch(`${app.origin}/__admin/providers`).then((response) => response.json());
+  const finalProvider = finalPayload.providers.find((entry) => entry.id === provider.id);
+  assert.deepEqual(finalProvider.api_keys, []);
+  assert.equal(finalPayload.envKeys.find((entry) => entry.name === 'MANAGED_CUSTOM_KEYS').configured, false);
+  assert.equal(fs.readFileSync(path.join(app.home, '.codex-switch', 'env'), 'utf8').includes('MANAGED_CUSTOM_KEYS='), false);
+  assert.equal(app.output().includes(oldKey) || app.output().includes(newKey), false);
 });
 
 test('adding a bearer provider cannot rebind an already configured environment key', async (t) => {

@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync, execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import https from 'node:https';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -162,6 +163,31 @@ function parseStoredApiKeys(value) {
     }
   } catch { /* Existing single keys are plain strings. */ }
   return [value];
+}
+
+function apiKeyId(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function maskApiKey(value) {
+  if (value.length <= 1) return '…';
+  if (value.length <= 4) return `${value.slice(0, 1)}…${value.slice(-1)}`;
+  if (value.length <= 8) return `${value.slice(0, 2)}…${value.slice(-2)}`;
+  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
+
+function storedEnvValue(name) {
+  if (!name) return '';
+  const fileEntries = readEnvFileEntries();
+  return fileEntries.has(name) ? fileEntries.get(name) : (process.env[name] || '');
+}
+
+function storedProviderApiKeys(provider) {
+  return parseStoredApiKeys(storedEnvValue(provider?.token_env));
+}
+
+function projectApiKeys(provider) {
+  return storedProviderApiKeys(provider).map((value) => ({ id: apiKeyId(value), masked: maskApiKey(value) }));
 }
 
 function providerApiKey(provider, sessionKey = '') {
@@ -1475,6 +1501,14 @@ function submittedApiKeys(input) {
   }
 }
 
+function submittedApiKeyIds(input) {
+  const values = input.delete_api_key_ids === undefined ? [] : input.delete_api_key_ids;
+  if (!Array.isArray(values) || values.some((value) => typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value))) {
+    throw new Error('待删除 API Key 格式无效');
+  }
+  return new Set(values);
+}
+
 function saveProviderApiKeys(name, keys) {
   return saveEnvKey(name, keys.length === 1 ? keys[0] : JSON.stringify(keys));
 }
@@ -1568,6 +1602,7 @@ async function addProvider(p) {
 async function updateProvider(origId, p) {
   const np = normalizeProvider(p);
   const apiKeys = submittedApiKeys(p);
+  const deleteApiKeyIds = submittedApiKeyIds(p);
   const original = (getConfig().providers || []).find((provider) => provider.id === origId);
   if (!original) throw new Error(`未找到 provider '${origId}'`);
   let connectionChanged = true;
@@ -1576,12 +1611,17 @@ async function updateProvider(origId, p) {
   const canReuseOriginalCredential = original.auth === 'bearer'
     && !connectionChanged
     && (!submittedTokenEnv || submittedTokenEnv === original.token_env);
-  if (np.auth === 'bearer' && !apiKeys.length && !canReuseOriginalCredential) {
+  const retainedApiKeys = canReuseOriginalCredential && p.delete_key !== true
+    ? storedProviderApiKeys(original).filter((key) => !deleteApiKeyIds.has(apiKeyId(key)))
+    : [];
+  const nextApiKeys = [...new Set([...retainedApiKeys, ...apiKeys])];
+  const credentialMutation = apiKeys.length > 0 || deleteApiKeyIds.size > 0 || p.delete_key === true;
+  if (np.auth === 'bearer' && !nextApiKeys.length && !canReuseOriginalCredential) {
     throw new Error(connectionChanged
       ? '连接信息已变化，必须同时填写新的 API Key'
       : '凭证引用已变化，必须同时填写新的 API Key');
   }
-  if (apiKeys.length && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
+  if (credentialMutation && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
   const result = mutateProviders((providers) => {
     const i = providers.findIndex((x) => x.id === origId);
     if (i === -1) throw new Error(`未找到 provider '${origId}'`);
@@ -1597,9 +1637,9 @@ async function updateProvider(origId, p) {
     return { ok: true, id: np.id };
   }, {
     authorizedBearerProviderIds: apiKeys.length ? [np.id] : [],
-    afterWrite: apiKeys.length
-      ? () => saveProviderApiKeys(np.token_env, apiKeys)
-      : (p.delete_key === true && np.token_env ? () => deleteEnvKey(np.token_env) : null),
+    afterWrite: credentialMutation
+      ? () => (nextApiKeys.length ? saveProviderApiKeys(np.token_env, nextApiKeys) : deleteEnvKey(np.token_env))
+      : null,
   });
   const capabilityRefresh = await refreshProviderCapsById(np.id, true);
   return { ...result, capability_refresh: capabilityRefresh };
@@ -1673,6 +1713,7 @@ function projectProviderForAdmin(provider) {
     capability_cache: capabilityCacheSummary(provider),
   };
   if (provider.token_env) output.token_env = String(provider.token_env);
+  output.api_keys = projectApiKeys(provider);
   return output;
 }
 
@@ -2008,7 +2049,9 @@ async function handleAdmin(req, bodyBuf, res) {
         const id = String(url.searchParams.get('id') || '');
         const prov = (c.providers || []).find((x) => x.id === id);
         if (!prov) return sendJson(res, 404, { error: 'not found', id });
-        return sendJson(res, 200, { ok: true, provider: projectProviderForAdmin(prov) });
+        const provider = projectProviderForAdmin(prov);
+        delete provider.api_keys;
+        return sendJson(res, 200, { ok: true, provider });
       }
       if (req.method === 'GET' && p === '/__admin/providers') {
         const c = getConfig();

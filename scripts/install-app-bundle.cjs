@@ -6,10 +6,17 @@ const path = require('node:path');
 const APP_BUNDLE_NAME = 'Codex Switch.app';
 const STAGE_PREFIX = '.codex-switch-stage.';
 const BACKUP_PREFIX = '.codex-switch-backup.';
+const PROVIDER_CONFIG = path.join('Contents', 'Resources', 'app', 'config.toml');
 
 function requireRealDirectory(fsImpl, target, label) {
   const stat = fsImpl.lstatSync(target);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} must be a real directory`);
+}
+
+function requireRealFile(fsImpl, target, label) {
+  const stat = fsImpl.lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} must be a real file`);
+  return stat;
 }
 
 function pathExists(fsImpl, target) {
@@ -55,6 +62,20 @@ function installAppBundle({ sourceApp, destination, physicalParent, fsImpl = def
       force: false,
     });
     requireRealDirectory(fsImpl, stagedApp, 'staged app');
+
+    if (pathExists(fsImpl, destination)) {
+      const destinationStat = fsImpl.lstatSync(destination);
+      if (destinationStat.isDirectory() && !destinationStat.isSymbolicLink()) {
+        const existingConfig = path.join(destination, PROVIDER_CONFIG);
+        if (pathExists(fsImpl, existingConfig)) {
+          const stagedConfig = path.join(stagedApp, PROVIDER_CONFIG);
+          const existingConfigStat = requireRealFile(fsImpl, existingConfig, 'existing provider config');
+          requireRealFile(fsImpl, stagedConfig, 'staged provider config');
+          fsImpl.copyFileSync(existingConfig, stagedConfig);
+          fsImpl.chmodSync(stagedConfig, existingConfigStat.mode & 0o777);
+        }
+      }
+    }
 
     backup = fsImpl.mkdtempSync(path.join(physicalParent, BACKUP_PREFIX));
     fsImpl.rmdirSync(backup);

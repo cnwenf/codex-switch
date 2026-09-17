@@ -405,11 +405,18 @@ test('provider save sends connection and multiple new keys in one atomic admin m
   assert.deepEqual(buildProviderMutationRequest(provider, {
     editing: 'custom-a',
     apiKeys: [],
-    deleteKey: true,
+    deleteApiKeyIds: ['opaque-key-id'],
   }), {
     url: '/__admin/providers/update',
-    body: { origId: 'custom-a', provider: { ...provider, delete_key: true } },
+    body: { origId: 'custom-a', provider: { ...provider, delete_api_key_ids: ['opaque-key-id'] } },
   });
+});
+
+test('provider editor shows masked saved keys with individual delete controls', () => {
+  const html = render();
+  assert.match(html, /id="savedApiKeyList"/);
+  assert.match(html, /已保存的 Key/);
+  assert.match(html, /delete_api_key_ids/);
 });
 
 test('clipboard export contains metadata only and JSON import always clears credential fields', async () => {
@@ -466,6 +473,7 @@ test('save rules block unroutable or invalid setups but allow explained unverifi
   assert.equal(getProviderSaveProblem(ready), '');
   assert.match(getProviderSaveProblem({ ...ready, routable: false, compatibility: 'unsupported' }), /Responses/);
   assert.match(getProviderSaveProblem({ ...ready, hasKey: false }), /API Key/);
+  assert.equal(getProviderSaveProblem({ ...ready, hasKey: false, allowMissingKey: true }), '');
   assert.match(getProviderSaveProblem({ ...ready, validationStatus: 'invalid' }), /API Key/);
   assert.match(getProviderSaveProblem({ ...ready, modelIds: [] }), /模型/);
   assert.match(getProviderSaveProblem({ ...ready, validationStatus: 'loading' }), /等待/);

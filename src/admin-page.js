@@ -33,7 +33,7 @@ export function getProviderSaveProblem(state) {
   if (!Array.isArray(state.modelIds) || state.modelIds.length === 0) {
     return '至少选择或手动添加一个可路由模型。';
   }
-  if (state.auth === 'bearer' && !state.hasKey && !state.hasSavedKey) {
+  if (state.auth === 'bearer' && !state.hasKey && !state.hasSavedKey && !state.allowMissingKey) {
     return '请填写 API Key。';
   }
   if (state.validationStatus === 'loading') return '请等待连接检测完成。';
@@ -164,9 +164,15 @@ export function isModelToggleAllowed(model, isSelected) {
   return Boolean(isSelected) || !model || (!model.referenceOnly && model.responses !== false);
 }
 
-export function buildProviderMutationRequest(provider, { editing = null, apiKeys = [], deleteKey = false } = {}) {
+export function buildProviderMutationRequest(provider, {
+  editing = null,
+  apiKeys = [],
+  deleteApiKeyIds = [],
+  deleteKey = false,
+} = {}) {
   const payload = { ...provider };
   if (apiKeys.length) payload.api_keys = apiKeys;
+  if (deleteApiKeyIds.length) payload.delete_api_key_ids = deleteApiKeyIds;
   if (deleteKey) payload.delete_key = true;
   return editing === null
     ? { url: '/__admin/providers', body: payload }
@@ -435,6 +441,8 @@ label.ck input{width:1rem;height:1rem;min-height:0;flex:none;accent-color:var(--
 .field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 var(--space-4)}
 .discovery-line{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;margin-top:var(--space-2)}
 .api-key-list{display:grid;gap:var(--space-2)}
+.saved-key-list{display:grid;gap:var(--space-1);margin-bottom:var(--space-2)}
+.saved-key-list label{display:flex;align-items:center;gap:var(--space-2);text-transform:none;color:var(--color-text)}
 .discovery-status{flex:1;min-width:0;margin:0;padding:var(--space-2) var(--space-3);border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface-muted);overflow-wrap:anywhere}
 .discovery-status.valid{color:var(--color-success);border-color:var(--color-success);background:var(--color-success-soft)}
 .discovery-status.loading,.discovery-status.unverified,.discovery-status.rate_limited,.discovery-status.forbidden{color:var(--color-warning);border-color:var(--color-warning);background:var(--color-warning-soft)}
@@ -619,12 +627,12 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
         </div>
       </div>
       <div class="frow" id="f-apikey-wrap"><label for="f-apikey">3 · API Key</label>
+        <div id="savedApiKeyList" class="saved-key-list" aria-label="已保存的 Key"></div>
         <div id="apiKeyList" class="api-key-list">
           <input id="f-apikey" type="password" class="mono api-key-input" placeholder="API Key 1" autocomplete="new-password" spellcheck="false" aria-describedby="f-apikey-hint discoveryStatus">
         </div>
         <button class="btn small" id="addApiKey" type="button">添加 Key</button>
         <div class="fhint" id="f-apikey-hint">每行一个 Key；仅第一把用于连接检测。保存到 ~/.codex-switch/env(chmod 600)，不回显、不进 URL、不写日志。</div>
-        <label class="ck" id="f-apikey-del-wrap" style="display:none;margin-top:.4rem"><input type="checkbox" id="f-apikey-del"> 清除已保存的 Key(该供应商将不可用,直到重新填写)</label>
         <div class="discovery-line">
           <button class="btn small" id="detectProvider" type="button">立即检测</button>
           <div id="discoveryStatus" class="discovery-status unverified" role="status" aria-live="polite">? 未验证 · 输入 Key 停顿 700 ms 后自动检测，也可立即检测。</div>
@@ -703,6 +711,7 @@ var DISCOVERY_MODEL_SOURCE='unknown';
 var MANUAL_MODEL_IDS=new Set();
 var VALIDATION_STATUS='unverified';
 var HAS_SAVED_KEY=false;
+var SAVED_API_KEYS=[];
 var SAVED_PROVIDER_TYPE='';
 var SAVED_TOKEN_ENV='';
 var PROVIDER_ACTIVE=-1;
@@ -1120,16 +1129,31 @@ function setMsg(message,ok){
   output.textContent=message||'';
   output.className='status'+(message?' '+(ok===false?'err':ok===true?'ok':'muted'):'');
 }
-function resetApiKeyFields(configured){
+function resetApiKeyFields(savedKeys){
+  SAVED_API_KEYS=Array.isArray(savedKeys)?savedKeys.slice():[];
+  HAS_SAVED_KEY=SAVED_API_KEYS.length>0;
+  var savedList=$('savedApiKeyList');
+  clearNode(savedList);
+  SAVED_API_KEYS.forEach(function(key){
+    var label=document.createElement('label');
+    var checkbox=document.createElement('input');
+    checkbox.type='checkbox';checkbox.className='saved-api-key-delete';checkbox.value=key.id;
+    label.appendChild(checkbox);
+    label.appendChild(element('span','mono',key.masked));
+    label.appendChild(element('span','hint','删除'));
+    savedList.appendChild(label);
+  });
   var inputs=$('apiKeyList').querySelectorAll('.api-key-input');
   for(var index=inputs.length-1;index>0;index--)inputs[index].remove();
   $('f-apikey').value='';
-  $('f-apikey-del').checked=false;
-  $('f-apikey-del-wrap').style.display=configured?'':'none';
-  $('f-apikey-hint').textContent=configured
-    ?'当前已配置 ✓；留空继续使用，填写后会整体覆盖。Key 不回传页面。'
+  $('f-apikey-hint').textContent=HAS_SAVED_KEY
+    ?'上方是当前保存的脱敏 Key；可勾选删除，也可在下方直接追加。'
     :'每行一个 Key；仅第一把用于连接检测。保存到 ~/.codex-switch/env(chmod 600)，不回显、不进 URL、不写日志。';
 }
+function selectedApiKeyIds(){
+  return Array.prototype.map.call($('savedApiKeyList').querySelectorAll('.saved-api-key-delete:checked'),function(input){return input.value;});
+}
+function hasUsableSavedApiKey(){return HAS_SAVED_KEY&&selectedApiKeyIds().length<SAVED_API_KEYS.length;}
 function enteredApiKeys(){
   return parseApiKeys(Array.prototype.map.call($('apiKeyList').querySelectorAll('.api-key-input'),function(input){return input.value;}).join('\\n'));
 }
@@ -1139,7 +1163,7 @@ function apiKeyChanged(){
 }
 function apiKeyBlurred(){
   clearTimeout(DISCOVERY_TIMER);
-  if(enteredApiKeys().length||HAS_SAVED_KEY||SELECTED_PRESET&&STATIC_UNVERIFIED[SELECTED_PRESET.id])requestDiscovery();
+  if(enteredApiKeys().length||hasUsableSavedApiKey()||SELECTED_PRESET&&STATIC_UNVERIFIED[SELECTED_PRESET.id])requestDiscovery();
 }
 function addApiKeyInput(){
   var input=document.createElement('input');
@@ -1177,7 +1201,7 @@ function scheduleDiscoveryIfReady(){
   clearTimeout(DISCOVERY_TIMER);
   if(!SELECTED_PRESET||!SELECTED_PRESET.routable)return;
   var entered=enteredApiKeys();
-  var canUseSaved=HAS_SAVED_KEY&&!$('f-apikey-del').checked;
+  var canUseSaved=hasUsableSavedApiKey();
   if($('f-auth').value==='bearer'&&!entered.length&&!canUseSaved&&!STATIC_UNVERIFIED[SELECTED_PRESET.id])return;
   DISCOVERY_TIMER=setTimeout(requestDiscovery,700);
 }
@@ -1195,7 +1219,7 @@ function requestDiscovery(){
     return;
   }
   var enteredKey=enteredApiKeys()[0]||'';
-  var canUseSaved=HAS_SAVED_KEY&&!$('f-apikey-del').checked;
+  var canUseSaved=hasUsableSavedApiKey();
   if($('f-auth').value==='bearer'&&!enteredKey&&!canUseSaved&&!STATIC_UNVERIFIED[SELECTED_PRESET.id]){
     setDiscoveryStatus('invalid','请填写 API Key，或编辑已有已配置 Key 的供应商。');
     return;
@@ -1488,7 +1512,7 @@ function openEdit(id){
   $('f-id').value=provider.id;
   $('f-id').readOnly=true;
   $('f-enabled').checked=provider.enabled!==false;
-  resetApiKeyFields(HAS_SAVED_KEY);
+  resetApiKeyFields(provider.api_keys||[]);
   SELECTED_MODELS=mergeSelectedModels(provider.models||[],[]);
   MANUAL_MODEL_IDS=new Set(provider.models||[]);
   var preset=findPreset(provider.provider_type)||findPreset('custom');
@@ -1550,14 +1574,15 @@ function saveProvider(){
   var auth=$('f-auth').value;
   if(auth==='bearer'&&!tokenEnv)tokenEnv=SELECTED_PRESET.tokenEnv||autoTokenEnv(id);
   var enteredKeys=enteredApiKeys();
-  var deleteKey=$('f-apikey-del').checked;
+  var deleteApiKeyIds=selectedApiKeyIds();
   var modelIds=SELECTED_MODELS.map(function(model){return model.id;});
   var problem=getProviderSaveProblem({
     routable:!!SELECTED_PRESET.routable,
     compatibility:SELECTED_PRESET.compatibility,
     auth:auth,
     hasKey:enteredKeys.length>0,
-    hasSavedKey:HAS_SAVED_KEY&&!deleteKey,
+    hasSavedKey:hasUsableSavedApiKey(),
+    allowMissingKey:EDITING!==null&&deleteApiKeyIds.length===SAVED_API_KEYS.length,
     modelIds:modelIds,
     modelSource:DISCOVERY_MODEL_SOURCE,
     requiresManualModel:SELECTED_PRESET.requiresManualModel===true,
@@ -1581,7 +1606,7 @@ function saveProvider(){
   var request=buildProviderMutationRequest(provider,{
     editing:EDITING,
     apiKeys:auth==='bearer'&&tokenEnv?enteredKeys:[],
-    deleteKey:auth==='bearer'&&tokenEnv&&deleteKey
+    deleteApiKeyIds:auth==='bearer'&&tokenEnv?deleteApiKeyIds:[]
   });
   var advisory=VALIDATION_STATUS!=='valid';
   $('saveBtn').disabled=true;
@@ -1593,7 +1618,7 @@ function saveProvider(){
   pending.then(function(){
     $('saveBtn').disabled=false;
     $('saveBtn').setAttribute('aria-busy','false');
-    var what=deleteKey?' · Key 已清除':($('f-apikey').value.trim()?' · API Key 已保存，能力已刷新':'');
+    var what=deleteApiKeyIds.length?' · Key 列表已更新':($('f-apikey').value.trim()?' · API Key 已保存，能力已刷新':'');
     toast((EDITING!==null?'供应商已更新: ':'供应商已添加: ')+provider.id+what+(advisory?' · 连接未确认，首次调用为准':''));
     closeModal();
     loadProviders();
@@ -1625,8 +1650,8 @@ $('f-baseurl').addEventListener('input',function(){
 $('f-apikey').addEventListener('input',apiKeyChanged);
 $('f-apikey').addEventListener('blur',apiKeyBlurred);
 $('addApiKey').addEventListener('click',addApiKeyInput);
-$('f-apikey-del').addEventListener('change',function(){
-  invalidateDiscovery(true,this.checked?'已选择清除 Key；取消或填写新 Key 后再检测。':'Key 状态已变化，请重新检测。');
+$('savedApiKeyList').addEventListener('change',function(){
+  invalidateDiscovery(true,'Key 列表已变化，请重新检测。');
   scheduleDiscoveryIfReady();
 });
 $('detectProvider').addEventListener('click',requestDiscovery);
