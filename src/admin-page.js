@@ -569,7 +569,7 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
 <header class="topbar">
   <div class="topbar-inner">
     <div class="brand">
-      <svg class="logo" viewBox="0 0 64 64" role="img" aria-label="Codex Switch"><rect x="4" y="4" width="56" height="56" rx="14" fill="#111111"/><path d="M19 24H45M38 17l7 7-7 7M45 40H19M26 33l-7 7 7 7" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <svg class="logo" viewBox="0 0 64 64" role="img" aria-label="Codex Switch"><rect x="4" y="4" width="56" height="56" rx="14" fill="#111111"/><g fill="#ffffff"><path d="M32 12 49.32 22V38L42.39 34V26L32 20 25.07 24 18.14 20Z"/><path d="M32 12 49.32 22V38L42.39 34V26L32 20 25.07 24 18.14 20Z" transform="rotate(120 32 32)"/><path d="M32 12 49.32 22V38L42.39 34V26L32 20 25.07 24 18.14 20Z" transform="rotate(240 32 32)"/></g><g fill="none" stroke="#111111" stroke-width="2.5"><path d="M31 10 39 25"/><path d="M31 10 39 25" transform="rotate(120 32 32)"/><path d="M31 10 39 25" transform="rotate(240 32 32)"/></g></svg>
       <span class="brand-copy"><span class="brand-name">Codex Switch</span><span class="sub">本地模型工作空间</span></span>
     </div>
     <nav id="managementTabs" class="tabs" role="tablist" aria-label="管理页面" aria-orientation="vertical">
