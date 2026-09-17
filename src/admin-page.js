@@ -145,6 +145,10 @@ export function clearSensitiveModalFields(apiKeyInput, importInput) {
   if (importInput) importInput.value = '';
 }
 
+export function parseApiKeys(value) {
+  return [...new Set(String(value || '').split(/\r?\n/).map((key) => key.trim()).filter(Boolean))];
+}
+
 export function markDiscoveredModels(models, modelSource, requiresManualModel) {
   const referenceOnly = modelSource === 'manual' && Boolean(requiresManualModel);
   return (Array.isArray(models) ? models : []).map((model) => ({ ...model, referenceOnly }));
@@ -160,9 +164,9 @@ export function isModelToggleAllowed(model, isSelected) {
   return Boolean(isSelected) || !model || (!model.referenceOnly && model.responses !== false);
 }
 
-export function buildProviderMutationRequest(provider, { editing = null, apiKey = '', deleteKey = false } = {}) {
+export function buildProviderMutationRequest(provider, { editing = null, apiKeys = [], deleteKey = false } = {}) {
   const payload = { ...provider };
-  if (apiKey) payload.api_key = apiKey;
+  if (apiKeys.length) payload.api_keys = apiKeys;
   if (deleteKey) payload.delete_key = true;
   return editing === null
     ? { url: '/__admin/providers', body: payload }
@@ -430,6 +434,7 @@ label.ck input{width:1rem;height:1rem;min-height:0;flex:none;accent-color:var(--
 .compat-action{margin:var(--space-2) 0 0}
 .field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 var(--space-4)}
 .discovery-line{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;margin-top:var(--space-2)}
+.api-key-list{display:grid;gap:var(--space-2)}
 .discovery-status{flex:1;min-width:0;margin:0;padding:var(--space-2) var(--space-3);border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface-muted);overflow-wrap:anywhere}
 .discovery-status.valid{color:var(--color-success);border-color:var(--color-success);background:var(--color-success-soft)}
 .discovery-status.loading,.discovery-status.unverified,.discovery-status.rate_limited,.discovery-status.forbidden{color:var(--color-warning);border-color:var(--color-warning);background:var(--color-warning-soft)}
@@ -614,8 +619,11 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
         </div>
       </div>
       <div class="frow" id="f-apikey-wrap"><label for="f-apikey">3 · API Key</label>
-        <input id="f-apikey" type="password" class="mono" placeholder="在此粘贴 API Key" autocomplete="new-password" spellcheck="false" aria-describedby="f-apikey-hint discoveryStatus">
-        <div class="fhint" id="f-apikey-hint">Key 仅通过本机 POST 请求检测，保存到 ~/.codex-switch/env(chmod 600)；不回显、不进 URL、不写日志。</div>
+        <div id="apiKeyList" class="api-key-list">
+          <input id="f-apikey" type="password" class="mono api-key-input" placeholder="API Key 1" autocomplete="new-password" spellcheck="false" aria-describedby="f-apikey-hint discoveryStatus">
+        </div>
+        <button class="btn small" id="addApiKey" type="button">添加 Key</button>
+        <div class="fhint" id="f-apikey-hint">每行一个 Key；仅第一把用于连接检测。保存到 ~/.codex-switch/env(chmod 600)，不回显、不进 URL、不写日志。</div>
         <label class="ck" id="f-apikey-del-wrap" style="display:none;margin-top:.4rem"><input type="checkbox" id="f-apikey-del"> 清除已保存的 Key(该供应商将不可用,直到重新填写)</label>
         <div class="discovery-line">
           <button class="btn small" id="detectProvider" type="button">立即检测</button>
@@ -675,6 +683,7 @@ ${providerCompatibilityCopy.toString()}
 ${shouldCloseModalOnEscape.toString()}
 ${shouldConsumeComboboxEscape.toString()}
 ${clearSensitiveModalFields.toString()}
+${parseApiKeys.toString()}
 ${markDiscoveredModels.toString()}
 ${resolveDiscoveryModelSource.toString()}
 ${isModelToggleAllowed.toString()}
@@ -1112,12 +1121,32 @@ function setMsg(message,ok){
   output.className='status'+(message?' '+(ok===false?'err':ok===true?'ok':'muted'):'');
 }
 function resetApiKeyFields(configured){
+  var inputs=$('apiKeyList').querySelectorAll('.api-key-input');
+  for(var index=inputs.length-1;index>0;index--)inputs[index].remove();
   $('f-apikey').value='';
   $('f-apikey-del').checked=false;
   $('f-apikey-del-wrap').style.display=configured?'':'none';
   $('f-apikey-hint').textContent=configured
-    ?'当前已配置 ✓；留空继续使用，粘贴新值会覆盖。Key 不回传页面。'
-    :'Key 仅通过本机 POST 请求检测，保存到 ~/.codex-switch/env(chmod 600)；不回显、不进 URL、不写日志。';
+    ?'当前已配置 ✓；留空继续使用，填写后会整体覆盖。Key 不回传页面。'
+    :'每行一个 Key；仅第一把用于连接检测。保存到 ~/.codex-switch/env(chmod 600)，不回显、不进 URL、不写日志。';
+}
+function enteredApiKeys(){
+  return parseApiKeys(Array.prototype.map.call($('apiKeyList').querySelectorAll('.api-key-input'),function(input){return input.value;}).join('\\n'));
+}
+function apiKeyChanged(){
+  invalidateDiscovery(true,'Key 已变化，等待 700 ms 后检测。');
+  scheduleDiscoveryIfReady();
+}
+function apiKeyBlurred(){
+  clearTimeout(DISCOVERY_TIMER);
+  if(enteredApiKeys().length||HAS_SAVED_KEY||SELECTED_PRESET&&STATIC_UNVERIFIED[SELECTED_PRESET.id])requestDiscovery();
+}
+function addApiKeyInput(){
+  var input=document.createElement('input');
+  input.type='password';input.className='mono api-key-input';input.placeholder='API Key '+($('apiKeyList').children.length+1);
+  input.autocomplete='new-password';input.spellcheck=false;
+  input.addEventListener('input',apiKeyChanged);input.addEventListener('blur',apiKeyBlurred);
+  $('apiKeyList').appendChild(input);input.focus();
 }
 function setDiscoveryStatus(status,message){
   var known={loading:1,valid:1,invalid:1,forbidden:1,rate_limited:1,unreachable:1,unverified:1,unsupported:1};
@@ -1147,9 +1176,9 @@ function invalidateDiscovery(keepSelected,message){
 function scheduleDiscoveryIfReady(){
   clearTimeout(DISCOVERY_TIMER);
   if(!SELECTED_PRESET||!SELECTED_PRESET.routable)return;
-  var entered=$('f-apikey').value.trim();
+  var entered=enteredApiKeys();
   var canUseSaved=HAS_SAVED_KEY&&!$('f-apikey-del').checked;
-  if($('f-auth').value==='bearer'&&!entered&&!canUseSaved&&!STATIC_UNVERIFIED[SELECTED_PRESET.id])return;
+  if($('f-auth').value==='bearer'&&!entered.length&&!canUseSaved&&!STATIC_UNVERIFIED[SELECTED_PRESET.id])return;
   DISCOVERY_TIMER=setTimeout(requestDiscovery,700);
 }
 function requestDiscovery(){
@@ -1165,7 +1194,7 @@ function requestDiscovery(){
     setDiscoveryStatus('unverified','请先补全连接字段或 URL。');
     return;
   }
-  var enteredKey=$('f-apikey').value.trim();
+  var enteredKey=enteredApiKeys()[0]||'';
   var canUseSaved=HAS_SAVED_KEY&&!$('f-apikey-del').checked;
   if($('f-auth').value==='bearer'&&!enteredKey&&!canUseSaved&&!STATIC_UNVERIFIED[SELECTED_PRESET.id]){
     setDiscoveryStatus('invalid','请填写 API Key，或编辑已有已配置 Key 的供应商。');
@@ -1471,6 +1500,7 @@ function openEdit(id){
 function closeModal(){
   abortDiscovery();
   clearSensitiveModalFields($('f-apikey'),$('f-import'));
+  resetApiKeyFields(false);
   closeProviderList();
   $('modelListbox').hidden=true;
   $('modelSearch').setAttribute('aria-expanded','false');
@@ -1519,14 +1549,14 @@ function saveProvider(){
   var tokenEnv=$('f-tokenenv').value.trim();
   var auth=$('f-auth').value;
   if(auth==='bearer'&&!tokenEnv)tokenEnv=SELECTED_PRESET.tokenEnv||autoTokenEnv(id);
-  var enteredKey=$('f-apikey').value.trim();
+  var enteredKeys=enteredApiKeys();
   var deleteKey=$('f-apikey-del').checked;
   var modelIds=SELECTED_MODELS.map(function(model){return model.id;});
   var problem=getProviderSaveProblem({
     routable:!!SELECTED_PRESET.routable,
     compatibility:SELECTED_PRESET.compatibility,
     auth:auth,
-    hasKey:!!enteredKey,
+    hasKey:enteredKeys.length>0,
     hasSavedKey:HAS_SAVED_KEY&&!deleteKey,
     modelIds:modelIds,
     modelSource:DISCOVERY_MODEL_SOURCE,
@@ -1550,16 +1580,16 @@ function saveProvider(){
   if(tokenEnv)provider.token_env=tokenEnv;
   var request=buildProviderMutationRequest(provider,{
     editing:EDITING,
-    apiKey:auth==='bearer'&&tokenEnv?enteredKey:'',
+    apiKeys:auth==='bearer'&&tokenEnv?enteredKeys:[],
     deleteKey:auth==='bearer'&&tokenEnv&&deleteKey
   });
   var advisory=VALIDATION_STATUS!=='valid';
   $('saveBtn').disabled=true;
   $('saveBtn').setAttribute('aria-busy','true');
   var pending=api(request.url,request.body);
-  if(request.body.provider)request.body.provider.api_key='';
-  else request.body.api_key='';
-  enteredKey='';
+  if(request.body.provider)request.body.provider.api_keys=[];
+  else request.body.api_keys=[];
+  enteredKeys=[];
   pending.then(function(){
     $('saveBtn').disabled=false;
     $('saveBtn').setAttribute('aria-busy','false');
@@ -1592,14 +1622,9 @@ $('providerSearch').addEventListener('keydown',function(event){
 $('f-baseurl').addEventListener('input',function(){
   if(SELECTED_PRESET&&SELECTED_PRESET.id==='custom')updateBaseUrl(true);
 });
-$('f-apikey').addEventListener('input',function(){
-  invalidateDiscovery(true,'Key 已变化，等待 700 ms 后检测。');
-  scheduleDiscoveryIfReady();
-});
-$('f-apikey').addEventListener('blur',function(){
-  clearTimeout(DISCOVERY_TIMER);
-  if($('f-apikey').value.trim()||HAS_SAVED_KEY||SELECTED_PRESET&&STATIC_UNVERIFIED[SELECTED_PRESET.id])requestDiscovery();
-});
+$('f-apikey').addEventListener('input',apiKeyChanged);
+$('f-apikey').addEventListener('blur',apiKeyBlurred);
+$('addApiKey').addEventListener('click',addApiKeyInput);
 $('f-apikey-del').addEventListener('change',function(){
   invalidateDiscovery(true,this.checked?'已选择清除 Key；取消或填写新 Key 后再检测。':'Key 状态已变化，请重新检测。');
   scheduleDiscoveryIfReady();

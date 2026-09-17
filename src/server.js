@@ -62,6 +62,7 @@ const MAX_ADMIN_BODY_BYTES = 64 * 1024;
 let cfg = null;
 let routeTable = new Map();
 let cfgMtime = 0;
+const providerSessionKeyIndexes = new Map();
 
 function expandHome(p) {
   if (!p) return p;
@@ -152,11 +153,40 @@ function readAuthJson() {
 
 // ---------- auth header plan per provider ----------
 // Returns { set: {header:value}, strip: [headerNames...] } relative to incoming request.
-function authPlan(provider) {
+function parseStoredApiKeys(value) {
+  if (typeof value !== 'string' || !value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed) && parsed.length && parsed.every((key) => typeof key === 'string' && key)) {
+      return parsed;
+    }
+  } catch { /* Existing single keys are plain strings. */ }
+  return [value];
+}
+
+function providerApiKey(provider, sessionKey = '') {
+  const stored = (provider.token_env && process.env[provider.token_env]) || provider.token || '';
+  const keys = parseStoredApiKeys(stored);
+  if (!keys.length) return '';
+  if (!sessionKey) return keys[Math.floor(Math.random() * keys.length)];
+  let sessions = providerSessionKeyIndexes.get(provider.id);
+  if (!sessions) {
+    sessions = new Map();
+    providerSessionKeyIndexes.set(provider.id, sessions);
+  }
+  let index = sessions.get(sessionKey);
+  if (!Number.isInteger(index) || index >= keys.length) {
+    index = Math.floor(Math.random() * keys.length);
+    sessions.set(sessionKey, index);
+  }
+  return keys[index];
+}
+
+function authPlan(provider, sessionKey = '') {
   const type = provider.auth;
   if (type === 'passthrough') return { set: {}, strip: [] };
   if (type === 'bearer') {
-    const token = (provider.token_env && process.env[provider.token_env]) || provider.token;
+    const token = providerApiKey(provider, sessionKey);
     if (!token) throw new Error(`provider '${provider.id}': no token (env ${provider.token_env || 'token'} unset)`);
     return { set: { authorization: `Bearer ${token}` }, strip: ['authorization', 'chatgpt-account-id'] };
   }
@@ -200,7 +230,10 @@ function invalidateProviderMutationState(providerIds) {
   const uniqueProviderIds = [...new Set(providerIds.filter(Boolean))];
   providerMutationEpoch += 1;
   bumpProviderGenerations(uniqueProviderIds);
-  for (const providerId of uniqueProviderIds) invalidateDiscoveredModels(providerId);
+  for (const providerId of uniqueProviderIds) {
+    invalidateDiscoveredModels(providerId);
+    providerSessionKeyIndexes.delete(providerId);
+  }
 }
 
 function providersUsingTokenEnv(tokenEnv) {
@@ -312,7 +345,7 @@ function resolveSavedProviderKey(input) {
   const envName = typeof provider?.token_env === 'string' ? provider.token_env : '';
   if (!ENV_NAME_RE.test(envName)) return '';
   const value = process.env[envName];
-  return typeof value === 'string' && value.length <= 4096 ? value.trim() : '';
+  return typeof value === 'string' && value.length <= 4096 ? (parseStoredApiKeys(value)[0] || '').trim() : '';
 }
 
 function resolveDiscoveryCacheProvider(input) {
@@ -938,7 +971,9 @@ async function refreshProviderCaps(provider, force, isCurrent = () => true) {
       if (!isCurrent() || !providerRefreshLeaseIsCurrent(lease)) {
         return { provider: provider.id, status: 'superseded' };
       }
-      const apiKey = (normalized.token_env && process.env[normalized.token_env]) || normalized.token || '';
+      const apiKey = parseStoredApiKeys(
+        (normalized.token_env && process.env[normalized.token_env]) || normalized.token || '',
+      )[0] || '';
       const discovered = await discoverProvider({
         providerType: normalized.provider_type,
         providerOptions: normalized.provider_options,
@@ -1029,9 +1064,9 @@ function sendHtml(res, status, html) {
 }
 
 // ---------- proxy forward ----------
-async function forwardToUpstream(req, bodyBuf, provider, suffix, res) {
+async function forwardToUpstream(req, bodyBuf, provider, suffix, res, sessionKey = '') {
   const upstreamUrl = provider.base_url.replace(/\/+$/, '') + suffix;
-  const plan = authPlan(provider);
+  const plan = authPlan(provider, sessionKey);
   const controller = new AbortController();
   let upstream = null;
   let nodeStream = null;
@@ -1135,15 +1170,20 @@ async function handleProxy(req, bodyBuf, res) {
 
   // route by body.model
   let modelId = null;
+  let sessionKey = '';
   if (bodyBuf && bodyBuf.length) {
-    try { modelId = JSON.parse(bodyBuf.toString('utf8')).model || null; } catch { /* non-JSON body */ }
+    try {
+      const body = JSON.parse(bodyBuf.toString('utf8'));
+      modelId = body.model || null;
+      sessionKey = typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key : '';
+    } catch { /* non-JSON body */ }
   }
   if (!modelId) return sendJson(res, 502, { error: 'no model in request body, cannot route', path: suffix });
 
   const provider = getRouteTable().get(modelId);
   if (!provider) return sendJson(res, 502, { error: `no provider for model '${modelId}'` });
 
-  return forwardToUpstream(req, bodyBuf, provider, suffix, res);
+  return forwardToUpstream(req, bodyBuf, provider, suffix, res, sessionKey);
 }
 
 // ---------- provider CRUD + 配置历史(管理页用) ----------
@@ -1421,10 +1461,22 @@ function requireBearerCred(np) {
   }
 }
 
-function submittedApiKey(input) {
-  if (input.api_key === undefined) return '';
-  try { validateEnvKeyValue(input.api_key); } catch { throw new Error('API Key 格式无效'); }
-  return input.api_key.trim();
+function submittedApiKeys(input) {
+  const values = input.api_keys === undefined
+    ? (input.api_key === undefined ? [] : [input.api_key])
+    : input.api_keys;
+  if (!Array.isArray(values)) throw new Error('API Key 格式无效');
+  try {
+    const keys = [...new Set(values.map((value) => validateEnvKeyValue(value).trim()))];
+    if (keys.length > 1) validateEnvKeyValue(JSON.stringify(keys));
+    return keys;
+  } catch {
+    throw new Error('API Key 格式无效');
+  }
+}
+
+function saveProviderApiKeys(name, keys) {
+  return saveEnvKey(name, keys.length === 1 ? keys[0] : JSON.stringify(keys));
 }
 
 function cloneCapabilityCache() {
@@ -1498,16 +1550,16 @@ function restoreProviderPersistenceState(state) {
 async function addProvider(p) {
   const np = normalizeProvider(p);
   requireBearerCred(np);
-  const apiKey = submittedApiKey(p);
-  if (np.auth === 'bearer' && !apiKey) throw new Error('新增 bearer provider 必须同时填写新的 API Key');
-  if (apiKey && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
+  const apiKeys = submittedApiKeys(p);
+  if (np.auth === 'bearer' && !apiKeys.length) throw new Error('新增 bearer provider 必须同时填写新的 API Key');
+  if (apiKeys.length && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
   const result = mutateProviders((providers) => {
     if (providers.some((x) => x.id === np.id)) throw new Error(`provider '${np.id}' 已存在`);
     providers.push(np);
     return { ok: true, id: np.id };
   }, {
-    authorizedBearerProviderIds: apiKey ? [np.id] : [],
-    afterWrite: apiKey ? () => saveEnvKey(np.token_env, apiKey) : null,
+    authorizedBearerProviderIds: apiKeys.length ? [np.id] : [],
+    afterWrite: apiKeys.length ? () => saveProviderApiKeys(np.token_env, apiKeys) : null,
   });
   const capabilityRefresh = await refreshProviderCapsById(np.id, true);
   return { ...result, capability_refresh: capabilityRefresh };
@@ -1515,7 +1567,7 @@ async function addProvider(p) {
 
 async function updateProvider(origId, p) {
   const np = normalizeProvider(p);
-  const apiKey = submittedApiKey(p);
+  const apiKeys = submittedApiKeys(p);
   const original = (getConfig().providers || []).find((provider) => provider.id === origId);
   if (!original) throw new Error(`未找到 provider '${origId}'`);
   let connectionChanged = true;
@@ -1524,12 +1576,12 @@ async function updateProvider(origId, p) {
   const canReuseOriginalCredential = original.auth === 'bearer'
     && !connectionChanged
     && (!submittedTokenEnv || submittedTokenEnv === original.token_env);
-  if (np.auth === 'bearer' && !apiKey && !canReuseOriginalCredential) {
+  if (np.auth === 'bearer' && !apiKeys.length && !canReuseOriginalCredential) {
     throw new Error(connectionChanged
       ? '连接信息已变化，必须同时填写新的 API Key'
       : '凭证引用已变化，必须同时填写新的 API Key');
   }
-  if (apiKey && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
+  if (apiKeys.length && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
   const result = mutateProviders((providers) => {
     const i = providers.findIndex((x) => x.id === origId);
     if (i === -1) throw new Error(`未找到 provider '${origId}'`);
@@ -1544,9 +1596,9 @@ async function updateProvider(origId, p) {
     providers[i] = np;
     return { ok: true, id: np.id };
   }, {
-    authorizedBearerProviderIds: apiKey ? [np.id] : [],
-    afterWrite: apiKey
-      ? () => saveEnvKey(np.token_env, apiKey)
+    authorizedBearerProviderIds: apiKeys.length ? [np.id] : [],
+    afterWrite: apiKeys.length
+      ? () => saveProviderApiKeys(np.token_env, apiKeys)
       : (p.delete_key === true && np.token_env ? () => deleteEnvKey(np.token_env) : null),
   });
   const capabilityRefresh = await refreshProviderCapsById(np.id, true);

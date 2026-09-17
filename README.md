@@ -52,7 +52,7 @@ Responses SSE 的连接生命周期也随下游绑定：Codex 取消请求、关
 
 1. 搜索并选择厂商，先阅读 supported / beta / limited / unsupported 兼容状态。
 2. 填写厂商连接字段。固定和动态 URL 都由本地服务端重新计算；只有 Custom 和自托管 NIM 可填写 URL。
-3. 输入 API Key。停顿 700 ms 会自动检测，离开输入框会立即检测，也可以手工重试。
+3. 输入 API Key；多把 Key 时每行一个。第一把用于连接检测，实际请求按 `prompt_cache_key` 随机分配并保持会话粘连。停顿 700 ms 会自动检测，离开输入框会立即检测，也可以手工重试。
 4. 搜索发现结果并多选模型；没有发现接口时可以手工添加 model ID。
 5. 火山方舟必须填写实际 Endpoint ID，Azure 必须填写实际 Deployment ID；页面里的底座模型只是参考，不能当作路由 ID 保存。
 6. 保存后，到“配置历史”点“应用并备份”，再重启 Codex 让新的模型目录生效。

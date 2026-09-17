@@ -175,14 +175,14 @@ async function postRawConfig(origin, text) {
   });
 }
 
-async function proxyJson(origin, model, authorization = '') {
+async function proxyJson(origin, model, authorization = '', extraBody = {}) {
   return fetch(`${origin}/v1/responses`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       ...(authorization ? { authorization } : {}),
     },
-    body: JSON.stringify({ model, input: 'fixture input' }),
+    body: JSON.stringify({ model, input: 'fixture input', ...extraBody }),
   });
 }
 
@@ -745,6 +745,45 @@ test('adding a validated provider with its key refreshes capabilities before the
   assert.equal(model.context_window, 424242);
   assert.deepEqual(model.input_modalities, ['text', 'image']);
   assert.equal(app.output().includes(key), false);
+});
+
+test('multiple provider keys are random across sessions and sticky within one prompt cache key', async (t) => {
+  const keys = ['fixture-multi-key-a', 'fixture-multi-key-b'];
+  const app = await startCodexSwitchFixture(t);
+  const response = await postJson(app.origin, '/__admin/providers', {
+    id: 'multi-key-custom',
+    name: 'Multi-key Custom',
+    provider_type: 'custom',
+    provider_options: { base_url: `${app.upstreamOrigin}/v1` },
+    base_url: `${app.upstreamOrigin}/v1`,
+    auth: 'bearer',
+    token_env: 'MULTI_KEY_CUSTOM_KEYS',
+    api_keys: keys,
+    models: ['multi-key-model'],
+    enabled: true,
+  });
+
+  assert.equal(response.status, 200);
+  app.upstreamRequests.length = 0;
+  for (let index = 0; index < 4; index += 1) {
+    assert.equal((await proxyJson(app.origin, 'multi-key-model', '', {
+      prompt_cache_key: 'sticky-session',
+    })).status, 200);
+  }
+  const stickyAuthorizations = new Set(app.upstreamRequests.map((request) => request.authorization));
+  assert.equal(stickyAuthorizations.size, 1);
+  assert.equal(keys.map((key) => `Bearer ${key}`).includes([...stickyAuthorizations][0]), true);
+
+  for (let index = 0; index < 64; index += 1) {
+    assert.equal((await proxyJson(app.origin, 'multi-key-model', '', {
+      prompt_cache_key: `session-${index}`,
+    })).status, 200);
+  }
+  const used = new Set(app.upstreamRequests.map((request) => request.authorization));
+  assert.deepEqual(used, new Set(keys.map((key) => `Bearer ${key}`)));
+  const listed = await fetch(`${app.origin}/__admin/providers`).then((result) => result.text());
+  assert.equal(keys.some((key) => listed.includes(key)), false);
+  assert.equal(keys.some((key) => app.output().includes(key)), false);
 });
 
 test('adding a bearer provider cannot rebind an already configured environment key', async (t) => {

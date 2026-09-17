@@ -382,26 +382,29 @@ test('provider search matches Chinese and English while preserving Custom last w
   assert.notEqual(filterOptions(providers, ''), providers);
 });
 
-test('provider save sends connection and new key in one atomic admin mutation', async () => {
-  const { buildProviderMutationRequest } = await import('../src/admin-page.js');
+test('provider save sends connection and multiple new keys in one atomic admin mutation', async () => {
+  const { buildProviderMutationRequest, parseApiKeys } = await import('../src/admin-page.js');
   assert.equal(typeof buildProviderMutationRequest, 'function');
+  assert.equal(typeof parseApiKeys, 'function');
   const provider = {
     id: 'custom-a',
     provider_type: 'custom',
     base_url: 'https://a.example/v1',
     token_env: 'CUSTOM_A_KEY',
   };
+  const apiKeys = parseApiKeys(' fixture-key-a\nfixture-key-b\nfixture-key-a ');
+  assert.deepEqual(apiKeys, ['fixture-key-a', 'fixture-key-b']);
   assert.deepEqual(buildProviderMutationRequest(provider, {
     editing: null,
-    apiKey: 'fixture-new-key',
+    apiKeys,
     deleteKey: false,
   }), {
     url: '/__admin/providers',
-    body: { ...provider, api_key: 'fixture-new-key' },
+    body: { ...provider, api_keys: ['fixture-key-a', 'fixture-key-b'] },
   });
   assert.deepEqual(buildProviderMutationRequest(provider, {
     editing: 'custom-a',
-    apiKey: '',
+    apiKeys: [],
     deleteKey: true,
   }), {
     url: '/__admin/providers/update',
