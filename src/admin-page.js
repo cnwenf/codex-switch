@@ -108,7 +108,7 @@ export function combineCapability(first, second) {
 export function discoveryStatusCopy(status) {
   return {
     loading: { icon: '↻', label: '检测中' },
-    valid: { icon: '✓', label: '有效' },
+    valid: { icon: '✓', label: '连接正常' },
     invalid: { icon: '✕', label: '凭证无效' },
     forbidden: { icon: '!', label: '访问受限' },
     rate_limited: { icon: '!', label: '请求限流' },
@@ -569,7 +569,7 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
 <header class="topbar">
   <div class="topbar-inner">
     <div class="brand">
-      <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="12" r="1.9" fill="currentColor" stroke="none"/><path d="M6.5 12h4"/><path d="M10.5 12c3.2 0 3.6-4.5 6.8-4.5"/><path d="M10.5 12c3.2 0 3.6 4.5 6.8 4.5"/><path d="M17.3 4.6 21 7.5l-3.7 2.9"/><path d="M17.3 13.6 21 16.5l-3.7 2.9"/></svg>
+      <svg class="logo" viewBox="0 0 64 64" role="img" aria-label="Codex Switch"><rect x="4" y="4" width="56" height="56" rx="14" fill="#111111"/><path d="M19 24H45M38 17l7 7-7 7M45 40H19M26 33l-7 7 7 7" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
       <span class="brand-copy"><span class="brand-name">Codex Switch</span><span class="sub">本地模型工作空间</span></span>
     </div>
     <nav id="managementTabs" class="tabs" role="tablist" aria-label="管理页面" aria-orientation="vertical">
@@ -1244,7 +1244,8 @@ function setDiscoveryStatus(status,message){
   var copy=discoveryStatusCopy(VALIDATION_STATUS);
   var output=$('discoveryStatus');
   output.className='discovery-status '+VALIDATION_STATUS;
-  output.textContent=copy.icon+' '+copy.label+(message?' · '+message:'');
+  output.textContent=copy.icon+' '+copy.label+(message&&VALIDATION_STATUS!=='valid'?' · '+message:'');
+  output.title=message||'';
 }
 function abortDiscovery(){
   clearTimeout(DISCOVERY_TIMER);

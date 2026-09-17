@@ -618,6 +618,9 @@ test('combobox navigation wraps predictably and capability aggregation remains t
 });
 
 test('all validation states have visible icon and text labels', () => {
+  assert.equal(discoveryStatusCopy('valid').label, '连接正常');
+  assert.match(render(), /message&&VALIDATION_STATUS!=='valid'/);
+  assert.match(render(), /output\.title=message\|\|''/);
   for (const status of ['loading', 'valid', 'invalid', 'forbidden', 'rate_limited', 'unreachable', 'unverified', 'unsupported']) {
     const copy = discoveryStatusCopy(status);
     assert.ok(copy.icon, status);

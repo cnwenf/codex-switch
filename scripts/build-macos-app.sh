@@ -94,7 +94,8 @@ MB_SRC=assets/menubar/CodexSwitchMenuBar.swift
 MB_APP="$RES/CodexSwitchMenuBar.app"
 if [ -f "$MB_SRC" ] && command -v swiftc >/dev/null 2>&1; then
   if swiftc -O -framework AppKit "$MB_SRC" -o "$DIST/mb-bin" 2>/dev/null; then
-    mkdir -p "$MB_APP/Contents/MacOS"
+    mkdir -p "$MB_APP/Contents/MacOS" "$MB_APP/Contents/Resources"
+    cp assets/logo.svg "$MB_APP/Contents/Resources/logo.svg"
     mv "$DIST/mb-bin" "$MB_APP/Contents/MacOS/CodexSwitchMenuBar"
     chmod +x "$MB_APP/Contents/MacOS/CodexSwitchMenuBar"
     cat > "$MB_APP/Contents/Info.plist" <<'MBPLIST'
