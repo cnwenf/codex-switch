@@ -1,8 +1,8 @@
 // codex-switch — thin model-id-routing proxy for Codex.
-// Pure passthrough: zero body rewriting. Only auth headers are injected/swapped per provider.
+// Passthrough except for Bailian's unsupported, unpaired Codex notifications.
 //
 // Codex points ONE model_provider at this proxy; the proxy routes each request to
-// the correct upstream by reading body.model. Body + SSE responses are forwarded byte-for-byte.
+// the correct upstream by reading body.model. SSE responses remain byte-for-byte.
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -32,6 +32,7 @@ import {
 import { officialCatalog } from './official.js';
 import { discoverProvider } from './provider-discovery.js';
 import { safeUpstreamCauseCode } from './proxy-errors.js';
+import { prepareBailianRequest } from './bailian-compat.js';
 import {
   buildProvidersRegion,
   ENV_NAME_RE,
@@ -1091,6 +1092,7 @@ function sendHtml(res, status, html) {
 
 // ---------- proxy forward ----------
 async function forwardToUpstream(req, bodyBuf, provider, suffix, res, sessionKey = '') {
+  bodyBuf = prepareBailianRequest(provider, suffix, bodyBuf);
   const upstreamUrl = provider.base_url.replace(/\/+$/, '') + suffix;
   const plan = authPlan(provider, sessionKey);
   const controller = new AbortController();

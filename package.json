@@ -1,7 +1,7 @@
 {
   "name": "codex-switch",
-  "version": "0.6.3",
-  "description": "Thin model-id-routing proxy for Codex: one Codex provider -> N upstream providers, zero body rewriting.",
+  "version": "0.6.4",
+  "description": "Thin model-id-routing proxy for Codex with targeted provider compatibility.",
   "type": "module",
   "engines": {
     "node": ">=22.15.0 <23 || >=23.8.0"

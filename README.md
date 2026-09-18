@@ -4,7 +4,7 @@
 
 核心承诺：
 
-- **不改应用层 payload**：只读取请求 JSON 里的 `model` 字段做路由，不改写应用层 JSON 或 SSE event/data；正常 HTTP 代理仍会处理 hop-by-hop、认证和传输编码相关 header。
+- **默认透传 payload**：按请求里的 `model` 路由，SSE event/data 不改写。仅对百炼兼容缺少 `call_id` 的文本工具结果（转普通消息、保留正文），并清除历史修复的定时消息残留的工具结果 ID；正常 HTTP 代理仍会处理 hop-by-hop、认证和传输编码相关 header。
 - **Responses 边界清楚**：只有已确认存在 OpenAI Responses 接口的厂商才能保存为直连路由；仅兼容 Chat Completions 的厂商不会伪装成可用。
 - **纯配置**：路由来自 `config.toml`，无数据库；厂商连接信息热加载，模型目录更新后重启 Codex 生效。
 - **本地管理页**：可搜索厂商、检测 Key、发现并筛选模型、查看能力来源、备份/还原配置，并把模型目录应用到 Codex。
@@ -15,7 +15,7 @@
 
 全新安装只有 ChatGPT 订阅 provider，不再默认内置阿里云百炼或任何第三方 API provider。升级不会删除用户已有的百炼或其他 provider 配置。
 
-Codex 的模型选择器会把启用 provider 的模型合并展示。选中模型后，codex-switch 按原始 model ID 选择上游：ChatGPT 订阅沿用 Codex OAuth，第三方 API 替换为对应 Bearer 凭证；应用层 JSON 和 SSE payload 不改写。作为正常 HTTP 代理，它会剥离 hop-by-hop header、替换认证，并在 `fetch` 可能解压响应后移除不再准确的 `content-length` / `content-encoding`。
+Codex 的模型选择器会把启用 provider 的模型合并展示。选中模型后，codex-switch 按原始 model ID 选择上游：ChatGPT 订阅沿用 Codex OAuth，第三方 API 替换为对应 Bearer 凭证；除上述百炼兼容外，应用层 JSON 和 SSE payload 不改写。作为正常 HTTP 代理，它会剥离 hop-by-hop header、替换认证，并在 `fetch` 可能解压响应后移除不再准确的 `content-length` / `content-encoding`。
 
 Responses SSE 的连接生命周期也随下游绑定：Codex 取消请求、关闭响应，或在上游返回 header 前断开时，代理会取消对应的单次上游 `fetch` 并销毁响应流；正常完成的 SSE 不会被误取消。代理不会自动重试 `POST /responses`，避免一次取消或网络错误导致同一推理被重复执行。
 
