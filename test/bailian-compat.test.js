@@ -6,6 +6,44 @@ const provider = { provider_type: 'bailian' };
 const heartbeat = { type: 'function_call_output', name: 'automation_update', namespace: 'codex_app', id: 'fco_1', output: '<heartbeat>继续任务</heartbeat>' };
 const encode = (input) => Buffer.from(JSON.stringify({ model: 'kimi-k3', prompt_cache_key: 'session', input }));
 
+test('Bailian expands local tool schema references and cuts recursive edges only', () => {
+  const parameters = { type: 'object', properties: {
+    first: { $ref: '#/$defs/node' }, second: { $ref: '#/$defs/node' },
+  }, $defs: { node: { type: 'object', properties: {
+    value: { type: 'string' }, next: { $ref: '#/$defs/node' },
+  } } } };
+  const fn = { type: 'function', name: 'example', parameters, strict: false };
+  const body = Buffer.from(JSON.stringify({ input: [], tools: [fn, { type: 'namespace', name: 'app', tools: [fn] }], prompt_cache_key: 'same' }));
+  const result = JSON.parse(prepareBailianRequest(provider, '/responses', body));
+  const node = { type: 'object', properties: { value: { type: 'string' }, next: {} } };
+  const expected = { type: 'object', properties: { first: node, second: node } };
+  assert.deepEqual(result.tools[0], { ...fn, parameters: expected });
+  assert.deepEqual(result.tools[1].tools[0].parameters, expected);
+  assert.equal(result.prompt_cache_key, 'same');
+  assert.equal(prepareBailianRequest({ provider_type: 'openai' }, '/responses', body), body);
+  assert.equal(prepareBailianRequest(provider, '/chat/completions', body), body);
+});
+
+test('tool schemas without references or with unresolved references stay byte-identical', () => {
+  for (const parameters of [{ type: 'object', properties: {} }, { $ref: '#/$defs/missing' }, { $ref: 'https://example.com/schema' }]) {
+    const body = Buffer.from(JSON.stringify({ input: [], tools: [{ type: 'function', name: 'example', parameters }] }));
+    assert.equal(prepareBailianRequest(provider, '/responses', body), body);
+  }
+});
+
+test('schema property names and literal values are not interpreted as schema keywords', () => {
+  const literal = { $ref: 'literal data' };
+  const parameters = { type: 'object', properties: {
+    $ref: { $ref: '#/$defs/a~1b~0c', description: 'keep sibling constraints' },
+    enum: { $ref: '#/$defs/a~1b~0c' },
+  }, default: literal, $defs: { 'a/b~c': { type: 'string' } } };
+  const body = Buffer.from(JSON.stringify({ input: [], tools: [{ type: 'function', parameters }] }));
+  const result = JSON.parse(prepareBailianRequest(provider, '/responses', body)).tools[0].parameters;
+  assert.deepEqual(result.properties.$ref, { allOf: [{ type: 'string' }, { description: 'keep sibling constraints' }] });
+  assert.deepEqual(result.properties.enum, { type: 'string' });
+  assert.deepEqual(result.default, literal);
+});
+
 test('Bailian also converts unpaired cross-thread notifications and plain tool text', () => {
   for (const output of ['<codex_delegation>Reply OK</codex_delegation>', 'plain notification']) {
     const result = JSON.parse(prepareBailianRequest(provider, '/responses', encode([{ type: 'function_call_output', output }])));
