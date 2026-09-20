@@ -1,6 +1,6 @@
 {
   "name": "codex-switch",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "description": "Thin model-id-routing proxy for Codex with targeted provider compatibility.",
   "type": "module",
   "engines": {

@@ -45,6 +45,29 @@ test('provider type and options round-trip through TOML', () => {
   assert.equal(parsed.base_url, 'https://bedrock-mantle.us-east-1.api.aws/v1');
 });
 
+test('API key remarks round-trip through provider TOML without key material', () => {
+  const provider = normalizeProvider({
+    id: 'remarked',
+    provider_type: 'custom',
+    provider_options: { base_url: 'https://remarked.example/v1' },
+    base_url: 'https://remarked.example/v1',
+    auth: 'bearer',
+    token_env: 'REMARKED_API_KEY',
+    models: ['fixture-model'],
+    api_key_remarks: {
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef': ' 主账号 ',
+      'bad id': '忽略',
+      'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210': '',
+    },
+  });
+  assert.deepEqual(provider.api_key_remarks, {
+    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef': '主账号',
+  });
+  const parsed = TOML.parse(buildProvidersRegion([provider])).providers[0];
+  assert.deepEqual(parsed.api_key_remarks, provider.api_key_remarks);
+  assert.equal(JSON.stringify(parsed).includes('fixture-secret'), false);
+});
+
 test('token_env is canonical at the normalization boundary', () => {
   const base = {
     id: 'canonical-token-env',

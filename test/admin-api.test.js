@@ -809,6 +809,65 @@ test('provider list masks saved keys and reduces visible characters for short ke
   assert.equal(new Set(listed.map((key) => key.id)).size, keys.length);
 });
 
+test('provider keys support remarks and replacement without exposing key material', async (t) => {
+  const oldKey = 'sk-remark-old-1234567890';
+  const newKey = 'sk-remark-new-0987654321';
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'remarked-keys',
+      providerType: 'custom',
+      tokenEnv: 'REMARKED_CUSTOM_KEYS',
+      enabled: false,
+      models: ['fixture-model'],
+    }],
+    childEnv: { REMARKED_CUSTOM_KEYS: oldKey },
+  });
+  const provider = {
+    id: 'remarked-keys',
+    name: 'remarked-keys',
+    provider_type: 'custom',
+    provider_options: { base_url: `${app.upstreamOrigin}/v1` },
+    base_url: `${app.upstreamOrigin}/v1`,
+    auth: 'bearer',
+    token_env: 'REMARKED_CUSTOM_KEYS',
+    models: ['fixture-model'],
+    enabled: false,
+  };
+  const listed = () => fetch(`${app.origin}/__admin/providers`)
+    .then((response) => response.json())
+    .then((payload) => payload.providers.find((entry) => entry.id === provider.id).api_keys);
+
+  const [oldEntry] = await listed();
+  const remarked = await postJson(app.origin, '/__admin/providers/update', {
+    origId: provider.id,
+    provider: {
+      ...provider,
+      api_key_updates: [{ id: oldEntry.id, remark: ' 主账号 ' }],
+    },
+  });
+  assert.equal(remarked.status, 200);
+  assert.deepEqual(await listed(), [{ ...oldEntry, remark: '主账号' }]);
+  assertSourcedEnvValue(path.join(app.home, '.codex-switch', 'env'), 'REMARKED_CUSTOM_KEYS', oldKey);
+
+  const replaced = await postJson(app.origin, '/__admin/providers/update', {
+    origId: provider.id,
+    provider: {
+      ...provider,
+      api_key_updates: [{ id: oldEntry.id, api_key: newKey, remark: '备用账号' }],
+    },
+  });
+  assert.equal(replaced.status, 200);
+  const [newEntry] = await listed();
+  assert.notEqual(newEntry.id, oldEntry.id);
+  assert.equal(newEntry.masked, 'sk-r…4321');
+  assert.equal(newEntry.remark, '备用账号');
+  assertSourcedEnvValue(path.join(app.home, '.codex-switch', 'env'), 'REMARKED_CUSTOM_KEYS', newKey);
+
+  const body = await fetch(`${app.origin}/__admin/providers`).then((response) => response.text());
+  assert.equal(body.includes(oldKey) || body.includes(newKey), false);
+  assert.equal(app.output().includes(oldKey) || app.output().includes(newKey), false);
+});
+
 test('editing a provider appends new keys and deletes saved keys by opaque id', async (t) => {
   const oldKey = 'sk-old-1234567890';
   const newKey = 'sk-new-0987654321';

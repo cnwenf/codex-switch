@@ -167,11 +167,13 @@ export function isModelToggleAllowed(model, isSelected) {
 export function buildProviderMutationRequest(provider, {
   editing = null,
   apiKeys = [],
+  apiKeyUpdates = [],
   deleteApiKeyIds = [],
   deleteKey = false,
 } = {}) {
   const payload = { ...provider };
   if (apiKeys.length) payload.api_keys = apiKeys;
+  if (apiKeyUpdates.length) payload.api_key_updates = apiKeyUpdates;
   if (deleteApiKeyIds.length) payload.delete_api_key_ids = deleteApiKeyIds;
   if (deleteKey) payload.delete_key = true;
   return editing === null
@@ -478,6 +480,8 @@ label.ck input{width:1rem;height:1rem;min-height:0;flex:none;accent-color:var(--
 .saved-key-row.pending .saved-key-copy .mono{text-decoration:line-through;color:var(--color-text-muted)}
 .saved-key-row.pending{background:var(--color-error-soft)}
 .saved-key-row .btn{flex:none}
+.saved-key-edit{display:grid;gap:var(--space-2);margin-top:var(--space-2)}
+.saved-key-edit input{width:100%}
 .key-heading{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);margin-bottom:var(--space-2)}
 .key-heading label{font-weight:650}.key-heading .hint{font-size:var(--font-size-metadata)}
 #f-apikey-wrap{padding:var(--space-5) 0;margin:var(--space-4) 0;border-top:1px solid var(--color-border);border-bottom:1px solid var(--color-border)}
@@ -670,6 +674,7 @@ footer{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-4) var
         <div id="savedApiKeyList" class="saved-key-list" aria-label="已保存的 Key"></div>
         <div id="apiKeyList" class="api-key-list">
           <input id="f-apikey" type="password" class="mono api-key-input" placeholder="粘贴新的 API Key" autocomplete="new-password" spellcheck="false" aria-describedby="f-apikey-hint discoveryStatus">
+          <input id="f-apikey-remark" class="api-key-remark" placeholder="备注（可选）" autocomplete="off" aria-label="API Key 备注">
         </div>
         <button class="btn small" id="addApiKey" type="button">＋ 再添加一把</button>
         <div class="fhint" id="f-apikey-hint">每行一把 Key，保存后生效。仅第一把用于连接检测。</div>
@@ -1188,10 +1193,31 @@ function resetApiKeyFields(savedKeys){
   clearNode(savedList);
   SAVED_API_KEYS.forEach(function(key,index){
     var row=element('div','saved-key-row');
+    row.dataset.keyId=key.id;
     var copy=element('div','saved-key-copy');
     copy.appendChild(element('span','mono',key.masked));
-    var status=element('span','hint','Key '+(index+1)+' · 已保存');
+    var status=element('span','hint','Key '+(index+1)+(key.remark?' · '+key.remark:' · 已保存'));
     copy.appendChild(status);row.appendChild(copy);
+    var edit=element('button','btn small saved-api-key-edit','编辑');
+    edit.type='button';
+    edit.setAttribute('aria-label','编辑 Key '+(index+1));
+    edit.addEventListener('click',function(){
+      var existing=row.querySelector('.saved-key-edit');
+      if(existing){existing.remove();edit.textContent='编辑';return;}
+      var form=element('div','saved-key-edit');
+      var remark=document.createElement('input');
+      remark.className='saved-api-key-remark';remark.placeholder='备注（可选）';remark.value=key.remark||'';
+      remark.setAttribute('aria-label','Key '+(index+1)+' 备注');
+      remark.addEventListener('blur',function(){saveApiKeyRemark(key,index,remark.value.trim());});
+      remark.addEventListener('keydown',function(event){if(event.key==='Enter'){event.preventDefault();remark.blur();}});
+      var replacement=document.createElement('input');
+      replacement.type='password';replacement.className='mono saved-api-key-replace';replacement.placeholder='替换 Key（留空不变）';
+      replacement.autocomplete='new-password';replacement.spellcheck=false;
+      replacement.setAttribute('aria-label','替换 Key '+(index+1));
+      form.appendChild(remark);form.appendChild(replacement);copy.appendChild(form);
+      edit.textContent='收起';remark.focus();
+    });
+    row.appendChild(edit);
     var button=element('button','btn small danger saved-api-key-delete','删除');
     button.type='button';button.value=key.id;
     button.setAttribute('aria-pressed','false');
@@ -1218,9 +1244,56 @@ function resetApiKeyFields(savedKeys){
 function selectedApiKeyIds(){
   return Array.prototype.map.call($('savedApiKeyList').querySelectorAll('.saved-api-key-delete[aria-pressed="true"]'),function(button){return button.value;});
 }
+function changedApiKeyUpdates(){
+  return SAVED_API_KEYS.map(function(key,index){
+    var row=$('savedApiKeyList').children[index];
+    if(!row)return null;
+    var remarkInput=row.querySelector('.saved-api-key-remark');
+    var replaceInput=row.querySelector('.saved-api-key-replace');
+    var remark=remarkInput?remarkInput.value.trim():String(key.remark||'');
+    var replacement=replaceInput?replaceInput.value.trim():'';
+    if(remark===String(key.remark||'')&&!replacement)return null;
+    var update={id:key.id};
+    if(remark!==String(key.remark||''))update.remark=remark;
+    if(replacement)update.api_key=replacement;
+    return update;
+  }).filter(Boolean);
+}
+function saveApiKeyRemark(key,index,remark){
+  var provider=null;
+  for(var i=0;i<CURRENT.providers.length;i++){if(CURRENT.providers[i].id===EDITING){provider=CURRENT.providers[i];break;}}
+  if(!provider)return;
+  provider={...provider};
+  delete provider.api_keys;
+  var update={id:key.id};
+  if(remark===String(key.remark||''))return;
+  update.remark=remark;
+  var request=buildProviderMutationRequest(provider,{
+    editing:EDITING,
+    apiKeyUpdates:[update]
+  });
+  api(request.url,request.body).then(function(){
+    key.remark=remark;
+    var row=$('savedApiKeyList').children[index];
+    var status=row&&row.querySelector('.hint');
+    if(status)status.textContent='Key '+(index+1)+(remark?' · '+remark:' · 已保存');
+    toast('备注已保存');
+    loadProviders();
+  },function(error){
+    toast('备注保存失败: '+error.message,false);
+  });
+}
 function hasUsableSavedApiKey(){return HAS_SAVED_KEY&&selectedApiKeyIds().length<SAVED_API_KEYS.length;}
 function enteredApiKeys(){
   return parseApiKeys(Array.prototype.map.call($('apiKeyList').querySelectorAll('.api-key-input'),function(input){return input.value;}).join('\\n'));
+}
+function enteredApiKeyUpdates(){
+  return Array.prototype.map.call($('apiKeyList').querySelectorAll('.api-key-input'),function(input,index){
+    var key=input.value.trim();
+    if(!key)return null;
+    var remark=$('apiKeyList').querySelectorAll('.api-key-remark')[index];
+    return {api_key:key,remark:remark?remark.value.trim():''};
+  }).filter(Boolean);
 }
 function apiKeyChanged(){
   invalidateDiscovery(true,'Key 已变化，等待 700 ms 后检测。');
@@ -1236,7 +1309,10 @@ function addApiKeyInput(){
   input.setAttribute('aria-label',input.placeholder);
   input.autocomplete='new-password';input.spellcheck=false;
   input.addEventListener('input',apiKeyChanged);input.addEventListener('blur',apiKeyBlurred);
-  $('apiKeyList').appendChild(input);input.focus();
+  var remark=document.createElement('input');
+  remark.className='api-key-remark';remark.placeholder='备注（可选）';remark.autocomplete='off';
+  remark.setAttribute('aria-label','API Key '+($('apiKeyList').children.length+1)+' 备注');
+  $('apiKeyList').appendChild(input);$('apiKeyList').appendChild(remark);input.focus();
 }
 function setDiscoveryStatus(status,message){
   var known={loading:1,valid:1,invalid:1,forbidden:1,rate_limited:1,unreachable:1,unverified:1,unsupported:1};
@@ -1644,7 +1720,9 @@ function saveProvider(){
   var auth=$('f-auth').value;
   if(auth==='bearer'&&!tokenEnv)tokenEnv=SELECTED_PRESET.tokenEnv||autoTokenEnv(id);
   var enteredKeys=enteredApiKeys();
+  var enteredKeyUpdates=enteredApiKeyUpdates();
   var deleteApiKeyIds=selectedApiKeyIds();
+  var apiKeyUpdates=changedApiKeyUpdates();
   var modelIds=SELECTED_MODELS.map(function(model){return model.id;});
   var problem=getProviderSaveProblem({
     routable:!!SELECTED_PRESET.routable,
@@ -1676,6 +1754,7 @@ function saveProvider(){
   var request=buildProviderMutationRequest(provider,{
     editing:EDITING,
     apiKeys:auth==='bearer'&&tokenEnv?enteredKeys:[],
+    apiKeyUpdates:auth==='bearer'&&tokenEnv?apiKeyUpdates.concat(enteredKeyUpdates):[],
     deleteApiKeyIds:auth==='bearer'&&tokenEnv?deleteApiKeyIds:[]
   });
   var advisory=VALIDATION_STATUS!=='valid';
@@ -1688,7 +1767,7 @@ function saveProvider(){
   pending.then(function(){
     $('saveBtn').disabled=false;
     $('saveBtn').setAttribute('aria-busy','false');
-    var what=deleteApiKeyIds.length?' · Key 列表已更新':($('f-apikey').value.trim()?' · API Key 已保存，能力已刷新':'');
+    var what=deleteApiKeyIds.length||apiKeyUpdates.length?' · Key 列表已更新':($('f-apikey').value.trim()?' · API Key 已保存，能力已刷新':'');
     toast((EDITING!==null?'供应商已更新: ':'供应商已添加: ')+provider.id+what+(advisory?' · 连接未确认，首次调用为准':''));
     closeModal();
     loadProviders();

@@ -49,11 +49,28 @@ export function buildProvidersRegion(providers) {
     lines.push(`base_url = ${tomlStr(provider.base_url || '')}`);
     lines.push(`auth = ${tomlStr(provider.auth || 'bearer')}`);
     if (provider.token_env) lines.push(`token_env = ${tomlStr(provider.token_env)}`);
+    if (provider.api_key_remarks && Object.keys(provider.api_key_remarks).length) {
+      lines.push(`api_key_remarks = ${tomlInlineTable(provider.api_key_remarks)}`);
+    }
     lines.push(`models = [${(provider.models || []).map(tomlStr).join(', ')}]`);
     lines.push(`enabled = ${provider.enabled === false ? 'false' : 'true'}`);
     return lines.join('\n');
   });
   return blocks.join('\n\n');
+}
+
+function normalizeApiKeyRemarks(value) {
+  if (value === undefined || value === null) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('api_key_remarks 必须是对象');
+  }
+  const remarks = {};
+  for (const [id, remark] of Object.entries(value)) {
+    if (!/^[a-f0-9]{64}$/.test(id)) continue;
+    const text = String(remark || '').trim();
+    if (text) remarks[id] = text.slice(0, 200);
+  }
+  return remarks;
 }
 
 // 在完整 config 文本里只替换 providers 区域,其余原样保留。
@@ -158,6 +175,8 @@ export function normalizeProvider(input) {
     auth,
   };
   if (auth === 'bearer' && common.tokenEnv) normalized.token_env = common.tokenEnv;
+  const apiKeyRemarks = normalizeApiKeyRemarks(provider.api_key_remarks);
+  if (Object.keys(apiKeyRemarks).length) normalized.api_key_remarks = apiKeyRemarks;
   normalized.models = common.models;
   normalized.enabled = common.enabled;
   return normalized;
@@ -238,6 +257,8 @@ export function normalizeProviderForLoad(input) {
     enabled: common.enabled,
   };
   if ((auth === 'bearer' || auth === 'chatgpt_oauth') && common.tokenEnv) normalized.token_env = common.tokenEnv;
+  const apiKeyRemarks = normalizeApiKeyRemarks(provider.api_key_remarks);
+  if (Object.keys(apiKeyRemarks).length) normalized.api_key_remarks = apiKeyRemarks;
   if (auth === 'bearer' && inlineToken) normalized.token = inlineToken;
   return normalized;
 }

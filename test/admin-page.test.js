@@ -415,11 +415,37 @@ test('provider save sends connection and multiple new keys in one atomic admin m
   });
 });
 
+test('provider save sends key remarks and replacements by opaque key id', async () => {
+  const { buildProviderMutationRequest } = await import('../src/admin-page.js');
+  const provider = {
+    id: 'custom-a',
+    provider_type: 'custom',
+    base_url: 'https://a.example/v1',
+    token_env: 'CUSTOM_A_KEY',
+  };
+  assert.deepEqual(buildProviderMutationRequest(provider, {
+    editing: 'custom-a',
+    apiKeyUpdates: [{ id: 'opaque-key-id', remark: '主账号', api_key: 'fixture-new-key' }],
+  }), {
+    url: '/__admin/providers/update',
+    body: {
+      origId: 'custom-a',
+      provider: {
+        ...provider,
+        api_key_updates: [{ id: 'opaque-key-id', remark: '主账号', api_key: 'fixture-new-key' }],
+      },
+    },
+  });
+});
+
 test('provider editor shows masked saved keys with individual delete controls', () => {
   const html = render();
   assert.match(html, /id="savedApiKeyList"/);
   assert.match(html, /已保存的 Key/);
   assert.match(html, /delete_api_key_ids/);
+  assert.match(html, /api_key_updates/);
+  assert.match(html, /备注/);
+  assert.match(html, /替换 Key/);
   assert.match(cssRule(html, '.saved-key-row'), /display:flex/);
   assert.match(cssRule(html, '.saved-key-copy'), /flex:1;min-width:0/);
   assert.match(cssRule(html, '.saved-key-row .btn'), /flex:none/);

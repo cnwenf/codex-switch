@@ -188,7 +188,15 @@ function storedProviderApiKeys(provider) {
 }
 
 function projectApiKeys(provider) {
-  return storedProviderApiKeys(provider).map((value) => ({ id: apiKeyId(value), masked: maskApiKey(value) }));
+  const remarks = provider?.api_key_remarks && typeof provider.api_key_remarks === 'object'
+    ? provider.api_key_remarks
+    : {};
+  return storedProviderApiKeys(provider).map((value) => {
+    const id = apiKeyId(value);
+    const output = { id, masked: maskApiKey(value) };
+    if (typeof remarks[id] === 'string' && remarks[id].trim()) output.remark = remarks[id].trim();
+    return output;
+  });
 }
 
 function providerApiKey(provider, sessionKey = '') {
@@ -1511,6 +1519,20 @@ function submittedApiKeyIds(input) {
   return new Set(values);
 }
 
+function submittedApiKeyUpdates(input) {
+  const values = input.api_key_updates === undefined ? [] : input.api_key_updates;
+  if (!Array.isArray(values)) throw new Error('API Key 更新格式无效');
+  return values.map((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('API Key 更新格式无效');
+    const id = String(value.id || '');
+    if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('API Key 更新格式无效');
+    const update = { id };
+    if (value.remark !== undefined) update.remark = String(value.remark).trim().slice(0, 200);
+    if (value.api_key !== undefined) update.apiKey = validateEnvKeyValue(String(value.api_key).trim());
+    return update;
+  });
+}
+
 function saveProviderApiKeys(name, keys) {
   return saveEnvKey(name, keys.length === 1 ? keys[0] : JSON.stringify(keys));
 }
@@ -1587,6 +1609,19 @@ async function addProvider(p) {
   const np = normalizeProvider(p);
   requireBearerCred(np);
   const apiKeys = submittedApiKeys(p);
+  const apiKeyUpdates = submittedApiKeyUpdates(p);
+  if (p.api_key_updates !== undefined
+    && (apiKeyUpdates.length !== apiKeys.length
+      || apiKeyUpdates.some((update) => update.apiKey === undefined))) {
+    throw new Error('新增 API Key 需要同时提供 Key 值');
+  }
+  if (p.api_key_updates !== undefined) {
+    np.api_key_remarks = Object.fromEntries(apiKeyUpdates
+      .filter((update) => update.apiKey !== undefined)
+      .map((update) => [apiKeyId(update.apiKey), update.remark])
+      .filter(([, remark]) => remark));
+    if (!Object.keys(np.api_key_remarks).length) delete np.api_key_remarks;
+  }
   if (np.auth === 'bearer' && !apiKeys.length) throw new Error('新增 bearer provider 必须同时填写新的 API Key');
   if (apiKeys.length && !ENV_NAME_RE.test(np.token_env || '')) throw new Error('保存 API Key 需要合法 token_env');
   const result = mutateProviders((providers) => {
@@ -1605,6 +1640,7 @@ async function updateProvider(origId, p) {
   const np = normalizeProvider(p);
   const apiKeys = submittedApiKeys(p);
   const deleteApiKeyIds = submittedApiKeyIds(p);
+  const apiKeyUpdates = submittedApiKeyUpdates(p);
   const original = (getConfig().providers || []).find((provider) => provider.id === origId);
   if (!original) throw new Error(`未找到 provider '${origId}'`);
   let connectionChanged = true;
@@ -1616,8 +1652,36 @@ async function updateProvider(origId, p) {
   const retainedApiKeys = canReuseOriginalCredential && p.delete_key !== true
     ? storedProviderApiKeys(original).filter((key) => !deleteApiKeyIds.has(apiKeyId(key)))
     : [];
-  const nextApiKeys = [...new Set([...retainedApiKeys, ...apiKeys])];
-  const credentialMutation = apiKeys.length > 0 || deleteApiKeyIds.size > 0 || p.delete_key === true;
+  const originalRemarks = original.api_key_remarks && typeof original.api_key_remarks === 'object'
+    ? original.api_key_remarks
+    : {};
+  const remarks = Object.fromEntries(Object.entries(originalRemarks)
+    .filter(([id]) => !deleteApiKeyIds.has(id))
+    .map(([id, remark]) => [id, String(remark || '').trim().slice(0, 200)])
+    .filter(([, remark]) => remark));
+  let nextApiKeys = [...retainedApiKeys];
+  for (const update of apiKeyUpdates) {
+    const index = nextApiKeys.findIndex((key) => apiKeyId(key) === update.id);
+    if (index < 0) throw new Error('要更新的 API Key 不存在');
+    if (update.apiKey !== undefined) {
+      const replacement = update.apiKey;
+      if (nextApiKeys.some((key, keyIndex) => keyIndex !== index && key === replacement)) {
+        throw new Error('API Key 已存在');
+      }
+      delete remarks[update.id];
+      nextApiKeys[index] = replacement;
+      if (update.remark) remarks[apiKeyId(replacement)] = update.remark;
+    } else if (update.remark !== undefined) {
+      if (update.remark) remarks[update.id] = update.remark;
+      else delete remarks[update.id];
+    }
+  }
+  nextApiKeys = [...new Set([...nextApiKeys, ...apiKeys])];
+  np.api_key_remarks = remarks;
+  if (!Object.keys(remarks).length) delete np.api_key_remarks;
+  const credentialMutation = apiKeys.length > 0 || deleteApiKeyIds.size > 0 || p.delete_key === true
+    || apiKeyUpdates.some((update) => update.apiKey !== undefined);
+  const envMutation = credentialMutation || apiKeyUpdates.length > 0;
   if (np.auth === 'bearer' && !nextApiKeys.length && !canReuseOriginalCredential) {
     throw new Error(connectionChanged
       ? '连接信息已变化，必须同时填写新的 API Key'
@@ -1639,7 +1703,7 @@ async function updateProvider(origId, p) {
     return { ok: true, id: np.id };
   }, {
     authorizedBearerProviderIds: apiKeys.length ? [np.id] : [],
-    afterWrite: credentialMutation
+    afterWrite: envMutation
       ? () => (nextApiKeys.length ? saveProviderApiKeys(np.token_env, nextApiKeys) : deleteEnvKey(np.token_env))
       : null,
   });
