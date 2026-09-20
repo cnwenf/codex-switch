@@ -65,6 +65,7 @@ let cfg = null;
 let routeTable = new Map();
 let cfgMtime = 0;
 const providerSessionKeyIndexes = new Map();
+const providerKeyUseCounts = new Map();
 
 function expandHome(p) {
   if (!p) return p;
@@ -203,7 +204,22 @@ function providerApiKey(provider, sessionKey = '') {
   const stored = (provider.token_env && process.env[provider.token_env]) || provider.token || '';
   const keys = parseStoredApiKeys(stored);
   if (!keys.length) return '';
-  if (!sessionKey) return keys[Math.floor(Math.random() * keys.length)];
+  let useCounts = providerKeyUseCounts.get(provider.id);
+  if (!useCounts) {
+    useCounts = new Array(keys.length).fill(0);
+    providerKeyUseCounts.set(provider.id, useCounts);
+  }
+  if (useCounts.length !== keys.length) {
+    useCounts = keys.map((_, index) => useCounts[index] || 0);
+    providerKeyUseCounts.set(provider.id, useCounts);
+  }
+  if (!sessionKey) {
+    let index = 0;
+    for (let i = 1; i < keys.length; i += 1) {
+      if (useCounts[i] < useCounts[index]) index = i;
+    }
+    return keys[index];
+  }
   let sessions = providerSessionKeyIndexes.get(provider.id);
   if (!sessions) {
     sessions = new Map();
@@ -211,8 +227,12 @@ function providerApiKey(provider, sessionKey = '') {
   }
   let index = sessions.get(sessionKey);
   if (!Number.isInteger(index) || index >= keys.length) {
-    index = Math.floor(Math.random() * keys.length);
+    index = 0;
+    for (let i = 1; i < keys.length; i += 1) {
+      if (useCounts[i] < useCounts[index]) index = i;
+    }
     sessions.set(sessionKey, index);
+    useCounts[index] += 1;
   }
   return keys[index];
 }

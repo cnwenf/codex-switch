@@ -787,6 +787,37 @@ test('multiple provider keys are random across sessions and sticky within one pr
   assert.equal(keys.some((key) => app.output().includes(key)), false);
 });
 
+test('new sessions pick the least-used key while existing sessions stay sticky', async (t) => {
+  const keys = ['fixture-least-key-a', 'fixture-least-key-b'];
+  const app = await startCodexSwitchFixture(t, {
+    providers: [{
+      id: 'least-key-custom',
+      providerType: 'custom',
+      tokenEnv: 'LEAST_KEY_CUSTOM_KEYS',
+      enabled: true,
+      models: ['least-key-model'],
+    }],
+    childEnv: { LEAST_KEY_CUSTOM_KEYS: JSON.stringify(keys) },
+  });
+
+  for (let index = 0; index < 6; index += 1) {
+    assert.equal((await proxyJson(app.origin, 'least-key-model', '', {
+      prompt_cache_key: `least-${index}`,
+    })).status, 200);
+  }
+  const counts = new Map();
+  for (const request of app.upstreamRequests.filter((request) => request.path === '/v1/responses')) {
+    counts.set(request.authorization, (counts.get(request.authorization) || 0) + 1);
+  }
+  assert.deepEqual([...counts.values()].sort(), [3, 3]);
+
+  app.upstreamRequests.length = 0;
+  assert.equal((await proxyJson(app.origin, 'least-key-model', '', {
+    prompt_cache_key: 'least-0',
+  })).status, 200);
+  assert.equal(app.upstreamRequests[0].authorization, `Bearer ${keys[0]}`);
+});
+
 test('provider list masks saved keys and reduces visible characters for short keys', async (t) => {
   const keys = ['a', 'abcd', 'abcdefg', 'sk-fixture-1234567890'];
   const app = await startCodexSwitchFixture(t, {
