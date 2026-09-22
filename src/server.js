@@ -66,6 +66,52 @@ let routeTable = new Map();
 let cfgMtime = 0;
 const providerSessionKeyIndexes = new Map();
 const providerKeyUseCounts = new Map();
+const SESSION_TTL_MS = 30 * 60 * 1000;
+const REBALANCE_INTERVAL_MS = 30 * 60 * 1000;
+
+function cleanupExpiredSessions(providerId) {
+  const sessions = providerSessionKeyIndexes.get(providerId);
+  if (!sessions) return;
+  const now = Date.now();
+  for (const [sessionKey, info] of sessions) {
+    if (now - info.lastUsed > SESSION_TTL_MS) {
+      sessions.delete(sessionKey);
+    }
+  }
+}
+
+function rebalanceProviderSessions(providerId, keys) {
+  const sessions = providerSessionKeyIndexes.get(providerId);
+  if (!sessions || !sessions.size) return;
+  const useCounts = providerKeyUseCounts.get(providerId) || new Array(keys.length).fill(0);
+  const entries = [...sessions.entries()];
+  const counts = new Array(keys.length).fill(0);
+  for (const [, info] of entries) counts[info.keyIndex] += 1;
+  const max = Math.max(...counts);
+  const min = Math.min(...counts);
+  if (max - min <= 1) return;
+  const newCounts = new Array(keys.length).fill(0);
+  for (const [sessionKey, info] of entries) {
+    let index = 0;
+    for (let i = 1; i < keys.length; i += 1) {
+      if (newCounts[i] < newCounts[index]) index = i;
+    }
+    sessions.set(sessionKey, { keyIndex: index, lastUsed: info.lastUsed });
+    newCounts[index] += 1;
+  }
+  providerKeyUseCounts.set(providerId, newCounts);
+}
+
+setInterval(() => {
+  for (const [providerId, sessions] of providerSessionKeyIndexes) {
+    cleanupExpiredSessions(providerId);
+    const provider = getConfig().providers?.find((p) => p.id === providerId);
+    if (provider) {
+      const keys = parseStoredApiKeys(storedEnvValue(provider.token_env));
+      if (keys.length) rebalanceProviderSessions(providerId, keys);
+    }
+  }
+}, REBALANCE_INTERVAL_MS);
 
 function expandHome(p) {
   if (!p) return p;
@@ -225,15 +271,16 @@ function providerApiKey(provider, sessionKey = '') {
     sessions = new Map();
     providerSessionKeyIndexes.set(provider.id, sessions);
   }
-  let index = sessions.get(sessionKey);
+  const existing = sessions.get(sessionKey);
+  let index = existing?.keyIndex;
   if (!Number.isInteger(index) || index >= keys.length) {
     index = 0;
     for (let i = 1; i < keys.length; i += 1) {
       if (useCounts[i] < useCounts[index]) index = i;
     }
-    sessions.set(sessionKey, index);
     useCounts[index] += 1;
   }
+  sessions.set(sessionKey, { keyIndex: index, lastUsed: Date.now() });
   return keys[index];
 }
 
@@ -288,6 +335,7 @@ function invalidateProviderMutationState(providerIds) {
   for (const providerId of uniqueProviderIds) {
     invalidateDiscoveredModels(providerId);
     providerSessionKeyIndexes.delete(providerId);
+    providerKeyUseCounts.delete(providerId);
   }
 }
 
